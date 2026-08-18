@@ -1,0 +1,31 @@
+# =============================================================================
+# .gitignore — Prediksi ATM
+# =============================================================================
+
+# Environment variables (berisi secrets — JANGAN di-commit)
+backend/.env
+frontend/.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# ML model artifacts (bisa di-regenerate, ukuran besar)
+backend/models/*.pkl
+
+# Node / Laravel
+node_modules/
+frontend/vendor/
+frontend/public/build/
+frontend/storage/logs/
+frontend/.env.backup
+
+# OS
+.DS_Store
+Thumbs.db
