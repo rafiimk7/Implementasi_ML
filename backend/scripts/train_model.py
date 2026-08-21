@@ -65,6 +65,10 @@ FITUR_ML = [
     # Trend historis + interaction tren-event
     "rolling_7d",
     "rolling_14d",
+    "rolling_30d",
+    "rolling_std_7d",
+    "rolling_std_14d",
+    "rolling_7d_ratio",
     "trend_7d_ratio",
     "trend_14d_ratio",
     "weekend_x_ratas_harian",
@@ -73,6 +77,22 @@ FITUR_ML = [
     "weekend_x_trend",
     "payday_x_trend",
     "holiday_x_trend",
+    # Lag & weekly Fourier
+    "lag_1_ratas",
+    "lag_7_ratas",
+    "lag_14_ratas",
+    "lag_7_sisa_pagu",
+    "weekday_sin",
+    "weekday_cos",
+    "payday_x_weekday_sin",
+    "weekend_x_rolling_std_7d",
+        # Event/window features
+        "cum_prev_3d",
+        "cum_prev_7d",
+        "cum_prev_14d",
+        "holiday_count_next_7",
+        "payday_cluster_flag",
+        "event_uplift",
 ]
 TARGET = "jumlah_hari"
 
@@ -222,15 +242,41 @@ def train(df: pd.DataFrame):
     # ==========================================================
     # TRAINING
     # ==========================================================
-    model = RandomForestRegressor(
-        n_estimators=100,
-        max_depth=8,
-        min_samples_split=10,
-        min_samples_leaf=5,
-        random_state=42,
-        n_jobs=-1,
-    )
-    model.fit(X_train_scaled, y_train)
+    # Prepare sample weights (emphasize event windows)
+    if "sample_weight_event" in df_ml.columns:
+        sample_weights = df_ml.loc[X_train.index, "sample_weight_event"].values
+    else:
+        sample_weights = None
+
+    # Try LightGBM first (supports sample_weight), fallback to RandomForest
+    try:
+        import lightgbm as lgb
+        print("Menggunakan LightGBM untuk training (dengan sample weights jika tersedia)")
+        model = lgb.LGBMRegressor(
+            n_estimators=500,
+            max_depth=8,
+            learning_rate=0.05,
+            random_state=42,
+            n_jobs=-1,
+        )
+        model.fit(X_train_scaled, y_train, sample_weight=sample_weights)
+        # feature importances from LGBM
+        importances = model.feature_importances_
+    except Exception:
+        print("LightGBM tidak tersedia atau gagal, fallback ke RandomForest (sample_weight akan dipakai jika tersedia)")
+        model = RandomForestRegressor(
+            n_estimators=200,
+            max_depth=8,
+            min_samples_split=10,
+            min_samples_leaf=5,
+            random_state=42,
+            n_jobs=-1,
+        )
+        if sample_weights is not None:
+            model.fit(X_train_scaled, y_train, sample_weight=sample_weights)
+        else:
+            model.fit(X_train_scaled, y_train)
+        importances = model.feature_importances_
 
     # ==========================================================
     # EVALUASI
@@ -250,7 +296,7 @@ def train(df: pd.DataFrame):
     # Feature importance
     feature_importance = pd.DataFrame({
         'feature': FITUR_ML,
-        'importance': model.feature_importances_
+        'importance': importances
     }).sort_values('importance', ascending=False)
     
     print("\nTOP 5 FEATURE IMPORTANCE:")

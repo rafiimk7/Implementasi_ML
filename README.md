@@ -2,8 +2,64 @@
 
 Aplikasi full-stack untuk memprediksi tanggal habis saldo ATM menggunakan machine learning (Random Forest) berbasis business rule. Terdiri dari **backend FastAPI** (Python) untuk ML pipeline & REST API, dan **frontend Laravel** (PHP) untuk dashboard monitoring.
 
+**Preprocessing Features (Lengkap)**
 ---
 
+- **Identitas & waktu**
+    - `tid` (VARCHAR) — ID terminal ATM
+    - `tanggal` (DATE) — tanggal agregasi harian
+    - `updated` (DATETIME) — timestamp terakhir pada hari itu
+
+- **Saldo & agregasi transaksi**
+    - `lmb1`..`lmb4`, `total_lmb` (BIGINT) — saldo per kaset dan total saldo
+    - `selisih_lmb` (BIGINT) — total penarikan/hari (sum diff per periode)
+    - `pagu_existing` (BIGINT) — kapasitas/pagu ATM
+    - `sisa_pagu` (BIGINT) — sisa pagu setelah transaksi pada hari itu
+
+- **Business-rule target**
+    - `ratas_harian` (INT) — rata-rata penarikan harian per `tid` (ceil dari mean selisih)
+    - `jumlah_hari` (INT) — TARGET training: ceil(sisa_pagu / ratas_harian)
+    - `tanggal_habis` (string) — `updated` + `jumlah_hari`
+
+- **Trend & rolling windows (capturing short/medium-term patterns)**
+    - `rolling_7d`, `rolling_14d`, `rolling_30d` (FLOAT) — mean historis (shifted)
+    - `rolling_std_7d`, `rolling_std_14d` (FLOAT) — volatilitas short/medium term
+    - `rolling_7d_ratio` (FLOAT) — perbandingan 7d vs 14d
+    - `trend_7d_ratio`, `trend_14d_ratio` (FLOAT) — rasio hari ini terhadap rolling mean
+
+- **Cumulative previous windows (event proxies)**
+    - `cum_prev_3d`, `cum_prev_7d`, `cum_prev_14d` (FLOAT) — jumlah penarikan pada window sebelumnya (proxy event surge)
+
+- **Calendar / temporal features**
+    - `hari`, `bulan`, `tahun`, `hari_ke` (SMALLINT)
+    - `kuartal` (SMALLINT)
+    - `hari_sin`, `hari_cos`, `bulan_sin`, `bulan_cos`, `hari_ke_sin`, `hari_ke_cos` (FLOAT) — cyclic encoding
+    - `weekday`, `weekday_sin`, `weekday_cos` (INT/FLOAT)
+
+- **Calendar-aware event flags (dihasilkan oleh `calendar_features.py`)**
+    - `is_weekend` (0/1) — Sabtu/Minggu
+    - `is_payday` (0/1) — hari gajian (konfigurasi `PAYDAY_DATE`)
+    - `is_holiday` (0/1) — libur nasional (Calendarific / fallback)
+    - `is_near_holiday_3d` (0/1) — dalam 3 hari sebelum/selesai libur
+    - `days_to_payday`, `days_since_payday` (INT)
+    - `holiday_count_next_7` (INT) — jumlah libur di 7 hari mendatang
+    - `payday_cluster_flag` (0/1) — ada payday dalam ±3 hari
+
+- **Event proxies & interactions**
+    - `event_uplift` (FLOAT) — `rolling_7d` / `rolling_30d` (proxy surge saat event)
+    - `sample_weight_event` (FLOAT) — bobot sample untuk training (menaikkan bobot baris event)
+    - `weekend_x_ratas_harian`, `payday_x_sisa_pagu`, `holiday_x_ratas_harian` (FLOAT)
+    - `weekend_x_trend`, `payday_x_trend`, `holiday_x_trend` (FLOAT)
+    - `payday_x_weekday_sin`, `weekend_x_rolling_std_7d` (FLOAT)
+
+- **Lag features**
+    - `lag_1_ratas`, `lag_7_ratas`, `lag_14_ratas` (INT)
+    - `lag_7_sisa_pagu` (BIGINT)
+
+- **Catatan penting**
+    - Semua fitur kalender dihasilkan oleh `backend/scripts/calendar_features.py` dan di-cache ke tabel `holiday_cache` ketika Calendarific API dipakai.
+    - Mapping dtype untuk penyimpanan ke MySQL didefinisikan dalam fungsi `save_to_db()` di `data_preprocessing.py`.
+    - Target `jumlah_hari` adalah hasil business rule; jika tersedia data refill (ground truth), pertimbangkan mengganti target untuk akurasi operasional yang lebih baik.
 ## 📌 Quick Overview
 
 | Komponen | Teknologi | Port | Deskripsi |

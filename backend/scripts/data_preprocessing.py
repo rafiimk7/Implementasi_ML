@@ -29,7 +29,7 @@ from sqlalchemy import BigInteger, Date, DateTime, Float, Integer, SmallInteger,
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from config.config import get_db_engine
-from calendar_features import add_calendar_flags
+from calendar_features import add_calendar_flags, get_holidays, get_payday_date
 
 # ==========================================================
 # KONFIGURASI
@@ -41,7 +41,7 @@ DT_COL       = "updated"        # kolom datetime utama
 
 # Konfigurasi fitur kalender cerdas
 PAYDAY_DATE          = os.getenv("PAYDAY_DATE", "25")           # "25" atau "last_workday"
-CALENDARIFIC_API_KEY = os.getenv("CALENDARIFIC_API_KEY", "")    # API key dari calendarific.com
+CALENDARIFIC_API_KEY = os.getenv("CALENDARIFIC_API_KEY", "ix341jES8qMP90wDJkUz3u0KFWryqa47")    # API key dari calendarific.com
 HOLIDAY_COUNTRY      = os.getenv("HOLIDAY_COUNTRY", "ID")       # kode negara ISO-3166
 
 print(f"[CONFIG] SOURCE_TABLE        : {SOURCE_TABLE}")
@@ -219,6 +219,42 @@ def preprocess(df: pd.DataFrame) -> pd.DataFrame:
         .transform(lambda s: s.shift(1).rolling(window=14, min_periods=1).mean())
     )
 
+    # Rolling standard deviation and longer window
+    df_harian["rolling_std_7d"] = (
+        df_harian.groupby("tid")["selisih_lmb"]
+        .transform(lambda s: s.shift(1).rolling(window=7, min_periods=1).std())
+    ).fillna(0.0)
+
+    df_harian["rolling_std_14d"] = (
+        df_harian.groupby("tid")["selisih_lmb"]
+        .transform(lambda s: s.shift(1).rolling(window=14, min_periods=1).std())
+    ).fillna(0.0)
+
+    df_harian["rolling_30d"] = (
+        df_harian.groupby("tid")["selisih_lmb"]
+        .transform(lambda s: s.shift(1).rolling(window=30, min_periods=1).mean())
+    )
+
+    # Lag features for rata & sisa_pagu (helps capture recent seasonal shifts)
+    df_harian["lag_1_ratas"] = (
+        df_harian.groupby("tid")["ratas_harian"].shift(1)
+    ).fillna(0).astype(int)
+    df_harian["lag_7_ratas"] = (
+        df_harian.groupby("tid")["ratas_harian"].shift(7)
+    ).fillna(0).astype(int)
+    df_harian["lag_14_ratas"] = (
+        df_harian.groupby("tid")["ratas_harian"].shift(14)
+    ).fillna(0).astype(int)
+
+    df_harian["lag_7_sisa_pagu"] = (
+        df_harian.groupby("tid")["sisa_pagu"].shift(7)
+    ).fillna(0).astype(int)
+
+    # Rolling ratio: short-term vs medium-term
+    df_harian["rolling_7d_ratio"] = (
+        df_harian["rolling_7d"].replace(0, np.nan) / df_harian["rolling_14d"].replace(0, np.nan)
+    ).fillna(1.0)
+
     df_harian["trend_7d_ratio"] = (
         df_harian["selisih_lmb"] / df_harian["rolling_7d"].replace(0, np.nan)
     ).fillna(1.0)
@@ -226,6 +262,31 @@ def preprocess(df: pd.DataFrame) -> pd.DataFrame:
     df_harian["trend_14d_ratio"] = (
         df_harian["selisih_lmb"] / df_harian["rolling_14d"].replace(0, np.nan)
     ).fillna(1.0)
+
+    # Cumulative previous windows (proxy for event-driven surge)
+    df_harian["cum_prev_3d"] = (
+        df_harian.groupby("tid")["selisih_lmb"]
+        .transform(lambda s: s.shift(1).rolling(window=3, min_periods=1).sum())
+    )
+    df_harian["cum_prev_7d"] = (
+        df_harian.groupby("tid")["selisih_lmb"]
+        .transform(lambda s: s.shift(1).rolling(window=7, min_periods=1).sum())
+    )
+    df_harian["cum_prev_14d"] = (
+        df_harian.groupby("tid")["selisih_lmb"]
+        .transform(lambda s: s.shift(1).rolling(window=14, min_periods=1).sum())
+    )
+
+    # Holiday count in next 7 days (uses holiday_set from calendar features later)
+    # placeholder zero; will be updated in feature_engineering where holiday_set is known
+    df_harian["holiday_count_next_7"] = 0
+
+    # Payday cluster: 1 if payday within +/-3 days
+    df_harian["payday_cluster_flag"] = 0
+
+    # Event uplift proxy: short-term vs long-term usage
+    df_harian["event_uplift"] = df_harian["rolling_7d"] / df_harian["rolling_30d"].replace(0, np.nan)
+    df_harian["event_uplift"] = df_harian["event_uplift"].replace([np.inf, -np.inf], np.nan).fillna(1.0)
 
     # ----------------------------------------------------------
     # HITUNG TARGET TRAINING: jumlah_hari dan tanggal_habis
@@ -298,6 +359,11 @@ def feature_engineering(df: pd.DataFrame, engine=None) -> pd.DataFrame:
     df["hari_ke_sin"] = np.sin(2 * np.pi * df["hari_ke"] / 365)
     df["hari_ke_cos"] = np.cos(2 * np.pi * df["hari_ke"] / 365)
 
+    # -- Mingguan (weekday) cyclic encoding : periode 7 --
+    df["weekday"] = df[DT_COL].dt.dayofweek  # 0 = Monday
+    df["weekday_sin"] = np.sin(2 * np.pi * df["weekday"] / 7)
+    df["weekday_cos"] = np.cos(2 * np.pi * df["weekday"] / 7)
+
     # -- Fitur kalender cerdas (flag + jarak ke gajian / libur) --
     df = add_calendar_flags(
         df,
@@ -306,6 +372,35 @@ def feature_engineering(df: pd.DataFrame, engine=None) -> pd.DataFrame:
         payday_config=PAYDAY_DATE,
         api_key=CALENDARIFIC_API_KEY,
         country=HOLIDAY_COUNTRY,
+    )
+
+    # Update holiday_count_next_7 and payday_cluster_flag using calendar info
+    if "is_holiday" in df.columns:
+        # Compute holiday dates set per TID date row
+        dt_ser = pd.to_datetime(df[DT_COL])
+        df["holiday_count_next_7"] = dt_ser.apply(
+            lambda t: sum(
+                1 for i in range(1, 8)
+                if (t.date() + pd.Timedelta(days=i)) in {
+                    d for y in range(t.year, t.year + 2) for d in get_holidays(y, engine=engine, api_key=CALENDARIFIC_API_KEY, country=HOLIDAY_COUNTRY)
+                }
+            )
+        )
+
+    if "is_payday" in df.columns:
+        dt_ser = pd.to_datetime(df[DT_COL])
+        df["payday_cluster_flag"] = dt_ser.apply(
+            lambda t: int(
+                any(
+                    abs((get_payday_date(dt.year, dt.month, PAYDAY_DATE) - t.date()).days) <= 3
+                    for dt in [t.date(), (t + pd.Timedelta(days=1)).date(), (t - pd.Timedelta(days=1)).date()]
+                )
+            )
+        )
+
+    # Sample weight: emphasize event windows (payday or near holiday)
+    df["sample_weight_event"] = 1.0 + (
+        df.get("is_payday", 0).astype(int) * 2.0 + df.get("is_near_holiday_3d", 0).astype(int) * 1.5
     )
 
     # Interaction features: kalender + transaksi
@@ -317,6 +412,10 @@ def feature_engineering(df: pd.DataFrame, engine=None) -> pd.DataFrame:
     df["weekend_x_trend"] = df["is_weekend"] * df["trend_7d_ratio"]
     df["payday_x_trend"] = df["is_payday"] * df["trend_7d_ratio"]
     df["holiday_x_trend"] = df["is_holiday"] * df["trend_7d_ratio"]
+
+    # Additional seasonal interactions
+    df["payday_x_weekday_sin"] = df["is_payday"] * df["weekday_sin"]
+    df["weekend_x_rolling_std_7d"] = df["is_weekend"] * df["rolling_std_7d"]
 
     print(
         f"\nFitur ditambahkan dari '{DT_COL}':\n"
@@ -348,9 +447,11 @@ def display_summary(df: pd.DataFrame) -> None:
         "hari", "bulan", "tahun", "hari_ke", "kuartal",
         "is_weekend", "is_payday", "is_holiday",
         "days_to_payday", "days_since_payday", "is_near_holiday_3d",
-        "rolling_7d", "rolling_14d", "trend_7d_ratio", "trend_14d_ratio",
+        "rolling_7d", "rolling_14d", "rolling_30d", "rolling_std_7d", "rolling_std_14d", "rolling_7d_ratio", "trend_7d_ratio", "trend_14d_ratio",
         "weekend_x_ratas_harian", "payday_x_sisa_pagu", "holiday_x_ratas_harian",
         "weekend_x_trend", "payday_x_trend", "holiday_x_trend",
+        "lag_1_ratas", "lag_7_ratas", "lag_14_ratas", "lag_7_sisa_pagu",
+        "weekday_sin", "weekday_cos", "payday_x_weekday_sin", "weekend_x_rolling_std_7d",
     ]
     # Hanya tampilkan kolom yang ada
     kolom_ada = [k for k in kolom_tampil if k in df.columns]
@@ -420,6 +521,14 @@ def save_to_db(df: pd.DataFrame, table_name: str = OUTPUT_TABLE) -> None:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype("float64")
 
+        # Additional event/window numeric columns
+        for col in [
+            "cum_prev_3d", "cum_prev_7d", "cum_prev_14d",
+            "holiday_count_next_7", "payday_cluster_flag", "event_uplift", "sample_weight_event"
+        ]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype("float64")
+
         # ----------------------------------------------------------
         # MAPPING DTYPE KE SQLAlchemy TYPE
         # ----------------------------------------------------------
@@ -457,6 +566,10 @@ def save_to_db(df: pd.DataFrame, table_name: str = OUTPUT_TABLE) -> None:
             "is_near_holiday_3d": SmallInteger(),
             "rolling_7d": Float(),
             "rolling_14d": Float(),
+            "rolling_30d": Float(),
+            "rolling_std_7d": Float(),
+            "rolling_std_14d": Float(),
+            "rolling_7d_ratio": Float(),
             "trend_7d_ratio": Float(),
             "trend_14d_ratio": Float(),
             "weekend_x_ratas_harian": Float(),
@@ -465,6 +578,21 @@ def save_to_db(df: pd.DataFrame, table_name: str = OUTPUT_TABLE) -> None:
             "weekend_x_trend": Float(),
             "payday_x_trend": Float(),
             "holiday_x_trend": Float(),
+            "lag_1_ratas": Integer(),
+            "lag_7_ratas": Integer(),
+            "lag_14_ratas": Integer(),
+            "lag_7_sisa_pagu": BigInteger(),
+            "weekday_sin": Float(),
+            "weekday_cos": Float(),
+            "payday_x_weekday_sin": Float(),
+            "weekend_x_rolling_std_7d": Float(),
+            "cum_prev_3d": Float(),
+            "cum_prev_7d": Float(),
+            "cum_prev_14d": Float(),
+            "holiday_count_next_7": Integer(),
+            "payday_cluster_flag": SmallInteger(),
+            "event_uplift": Float(),
+            "sample_weight_event": Float(),
         }
         # Hanya sertakan kolom yang benar-benar ada di DataFrame
         dtype_map = {k: v for k, v in dtype_map.items() if k in df.columns}
