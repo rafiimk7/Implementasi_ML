@@ -6,11 +6,11 @@ from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-# Auto-load .env dari folder backend/ jika ada
+# Auto-load  .env dari folder backend/ jika ada
 # Ini memungkinkan script dijalankan langsung tanpa `export` manual
 _ENV_FILE = Path(__file__).resolve().parents[1] / ".env"
 if _ENV_FILE.exists():
-    load_dotenv(_ENV_FILE, override=False)  # override=False: env var yang sudah di-set shell tetap menang
+    load_dotenv(_ENV_FILE, override=False)  #override=False: env var yang sudah di-set shell tetap menang
 
 # ===========================================================================
 # DATABASE CONFIG
@@ -53,4 +53,4 @@ def get_db_session():
     """Mendapatkan session database SQLAlchemy."""
     engine = get_db_engine()
     session_factory = sessionmaker(bind=engine)
-    return session_factory()
+    return session_factory()        

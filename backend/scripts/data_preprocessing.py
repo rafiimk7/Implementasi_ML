@@ -21,15 +21,29 @@ OUTPUT:
 
 import sys
 import os
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from sqlalchemy import BigInteger, Date, DateTime, Float, Integer, SmallInteger, String
 
-# Tambahkan root project ke sys.path agar config bisa diimport
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+# Tambahkan root project dan folder scripts ke sys.path agar config + helper lokal bisa diimport
+PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
+SCRIPTS_DIR = os.path.dirname(__file__)
+for p in [PROJECT_ROOT, SCRIPTS_DIR]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
 from config.config import get_db_engine
-from calendar_features import add_calendar_flags, get_holidays, get_payday_date
+try:
+    from calendar_features import add_calendar_flags, get_holidays, get_payday_date
+except ModuleNotFoundError:  # fallback saat file di-import dari package scripts/
+    from scripts.calendar_features import add_calendar_flags, get_holidays, get_payday_date
 
 # ==========================================================
 # KONFIGURASI
@@ -433,8 +447,142 @@ def feature_engineering(df: pd.DataFrame, engine=None) -> pd.DataFrame:
 
 
 # ==========================================================
-# 4. TAMPILKAN RINGKASAN
+# 4. VISUALISASI DATA
 # ==========================================================
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+VISUALIZATION_DIR = PROJECT_ROOT / "visualizations"
+VISUALIZATION_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def generate_visualizations(df: pd.DataFrame, output_dir: Path = VISUALIZATION_DIR) -> None:
+    """Menghasilkan visualisasi data untuk eksplorasi pola ATM dan fitur kalender."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    plot_df = df.copy()
+
+    if "tanggal" in plot_df.columns:
+        plot_df["tanggal"] = pd.to_datetime(plot_df["tanggal"])
+
+    # 1. Distribusi fitur utama
+    dist_cols = [
+        "selisih_lmb",
+        "pagu_existing",
+        "sisa_pagu",
+        "ratas_harian",
+        "jumlah_hari",
+    ]
+    dist_cols = [c for c in dist_cols if c in plot_df.columns]
+
+    if dist_cols:
+        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+        axes = axes.flatten()
+        for ax, col in zip(axes, dist_cols[:len(axes)]):
+            sns.histplot(plot_df[col].dropna(), bins=30, kde=True, ax=ax)
+            ax.set_title(f"Distribusi {col}")
+            ax.set_xlabel(col)
+            ax.set_ylabel("Frekuensi")
+        for i in range(len(dist_cols), len(axes)):
+            axes[i].axis("off")
+        fig.tight_layout()
+        fig.savefig(output_dir / "01_distribusi_fitur_utama.png", dpi=200)
+        plt.close(fig)
+
+    # 2. Trend agregat per tanggal
+    if {"tanggal", "total_lmb", "sisa_pagu", "selisih_lmb"}.issubset(plot_df.columns):
+        trend = (
+            plot_df.groupby("tanggal", as_index=False)
+            [["total_lmb", "sisa_pagu", "selisih_lmb"]]
+            .mean()
+            .sort_values("tanggal")
+        )
+        fig, axes = plt.subplots(3, 1, figsize=(18, 12), sharex=True)
+        axes[0].plot(trend["tanggal"], trend["total_lmb"], marker="o", linewidth=1.8)
+        axes[0].set_title("Rata-rata total_lmb per tanggal")
+        axes[1].plot(trend["tanggal"], trend["sisa_pagu"], marker="o", linewidth=1.8, color="green")
+        axes[1].set_title("Rata-rata sisa_pagu per tanggal")
+        axes[2].plot(trend["tanggal"], trend["selisih_lmb"], marker="o", linewidth=1.8, color="orange")
+        axes[2].set_title("Rata-rata selisih_lmb per tanggal")
+        for ax in axes:
+            ax.grid(True, linestyle="--", alpha=0.4)
+        fig.tight_layout()
+        fig.savefig(output_dir / "02_trend_per_tanggal.png", dpi=200)
+        plt.close(fig)
+
+    # 3. Distribusi event kalender
+    event_cols = [
+        "is_weekend",
+        "is_payday",
+        "is_holiday",
+        "is_near_holiday_3d",
+    ]
+    event_cols = [c for c in event_cols if c in plot_df.columns]
+    if event_cols:
+        event_summary = pd.DataFrame({
+            "kolom": event_cols,
+            "jumlah": [int(plot_df[c].sum()) for c in event_cols],
+        })
+        fig, ax = plt.subplots(figsize=(10, 5))
+        sns.barplot(data=event_summary, x="kolom", y="jumlah", palette="Set2", ax=ax)
+        ax.set_title("Jumlah event kalender")
+        ax.set_xlabel("Kolom fitur kalender")
+        ax.set_ylabel("Jumlah kejadian")
+        for label in ax.get_xticklabels():
+            label.set_rotation(0)
+        fig.tight_layout()
+        fig.savefig(output_dir / "03_event_kalender.png", dpi=200)
+        plt.close(fig)
+
+    # 4. Correlation heatmap
+    corr_cols = [
+        "total_lmb",
+        "selisih_lmb",
+        "pagu_existing",
+        "sisa_pagu",
+        "ratas_harian",
+        "jumlah_hari",
+        "is_weekend",
+        "is_payday",
+        "is_holiday",
+        "rolling_7d",
+        "rolling_30d",
+        "trend_7d_ratio",
+    ]
+    corr_cols = [c for c in corr_cols if c in plot_df.columns]
+    if len(corr_cols) > 1:
+        corr = plot_df[corr_cols].corr(numeric_only=True)
+        fig, ax = plt.subplots(figsize=(12, 9))
+        sns.heatmap(corr, annot=True, fmt=".2f", cmap="coolwarm", center=0, ax=ax)
+        ax.set_title("Heatmap Korelasi Fitur Utama")
+        fig.tight_layout()
+        fig.savefig(output_dir / "04_heatmap_korelasi.png", dpi=200)
+        plt.close(fig)
+
+    # 5. Top-risk ATM by sisa pagu and jumlah_hari
+    if {"tid", "sisa_pagu", "jumlah_hari"}.issubset(plot_df.columns):
+        risk = (
+            plot_df.groupby("tid", as_index=False)
+            [["sisa_pagu", "jumlah_hari"]]
+            .mean()
+            .sort_values(["jumlah_hari", "sisa_pagu"], ascending=[False, True])
+            .head(10)
+        )
+        fig, ax = plt.subplots(figsize=(12, 6))
+        sns.barplot(data=risk, x="tid", y="jumlah_hari", palette="Reds_d", ax=ax)
+        ax.set_title("10 ATM dengan prediksi hari paling panjang / paling kritis")
+        ax.set_xlabel("TID")
+        ax.set_ylabel("Jumlah hari")
+        ax.tick_params(axis="x", rotation=45)
+        fig.tight_layout()
+        fig.savefig(output_dir / "05_top_risk_atm.png", dpi=200)
+        plt.close(fig)
+
+    print(f"\nVisualisasi data disimpan di: {output_dir}")
+    print("  - 01_distribusi_fitur_utama.png")
+    print("  - 02_trend_per_tanggal.png")
+    print("  - 03_event_kalender.png")
+    print("  - 04_heatmap_korelasi.png")
+    print("  - 05_top_risk_atm.png")
+
 
 def display_summary(df: pd.DataFrame) -> None:
     """Menampilkan ringkasan hasil preprocessing."""
@@ -633,10 +781,13 @@ def main():
     engine = get_db_engine()
     result = feature_engineering(result, engine=engine)
 
-    # 4. Tampilkan ringkasan
+    # 4. Visualisasi data
+    generate_visualizations(result)
+
+    # 5. Tampilkan ringkasan
     display_summary(result)
 
-    # 5. Simpan ke tabel 'preprocessing' di database
+    # 6. Simpan ke tabel 'preprocessing' di database
     save_to_db(result)
 
     print("\n" + "=" * 70)

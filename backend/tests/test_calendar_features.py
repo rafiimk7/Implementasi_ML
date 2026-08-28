@@ -535,3 +535,4 @@ class TestAddCalendarFlagsWithApi:
             add_calendar_flags(df, dt_col="updated", api_key="FAKE_KEY")
 
         assert mock_gh.call_count == 2
+ 

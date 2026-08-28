@@ -137,21 +137,21 @@ Frontend tersedia di `http://127.0.0.1:8000`
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                        Browser (User)                             │
-│                   http://127.0.0.1:8000                           │
+│                        Browser (User)                            │
+│                   http://127.0.0.1:8000                          │
 └────────────────────────────┬─────────────────────────────────────┘
                              │
                              ▼
 ┌──────────────────────────────────────────────────────────────────┐
-│                    FRONTEND (Laravel 13)                          │
-│                                                                   │
-│  Routes:  GET /  → DashboardController@index                      │
-│                                                                   │
-│  Service: ApiService (HTTP Client ke Backend)                     │
-│  View:    dashboard.blade.php (Tailwind CSS)                      │
+│                    FRONTEND (Laravel 13)                         │
+│                                                                  │
+│  Routes:  GET /  → DashboardController@index                     │
+│                                                                  │
+│  Service: ApiService (HTTP Client ke Backend)                    │
+│  View:    dashboard.blade.php (Tailwind CSS)                     │
 │           ├── Summary Cards (Total/Kritis/Waspada/Aman)          │
-│           ├── Search & Filter by Status                           │
-│           └── Sortable Table                                      │
+│           ├── Search & Filter by Status                          │
+│           └── Sortable Table                                     │
 └────────────────────────────┬─────────────────────────────────────┘
                              │ HTTP (Guzzle)
                              ▼

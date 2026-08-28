@@ -48,9 +48,9 @@ FALLBACK_HOLIDAYS = {
         date(2024, 4, 8),   # Idul Fitri Joint Holiday
         date(2024, 4, 9),   # Idul Fitri Joint Holiday
         date(2024, 4, 10),  # Idul Fitri
-        date(2024, 4, 11),  # Idul Fitri Holiday
-        date(2024, 4, 12),  # Idul Fitri Joint Holiday
-        date(2024, 4, 15),  # Idul Fitri Joint Holiday
+        date(2024, 4, 11),  # Holiday
+        date(2024, 4, 12),  # Joint Holiday
+        date(2024, 4, 15),  # Holiday
         date(2024, 5, 1),   # International Labor Day
         date(2024, 5, 9),   # Ascension Day of Jesus Christ
         date(2024, 5, 10),  # Joint Holiday Ascension Day
@@ -532,7 +532,7 @@ def add_calendar_flags(
     df["is_payday"] = 0
     df["days_to_payday"] = 0
     df["days_since_payday"] = 0
-
+    
     if valid_mask.any():
         payday_dates = []
         for d in dt_series[valid_mask].dt.date:

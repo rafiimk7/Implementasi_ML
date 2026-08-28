@@ -13,8 +13,12 @@ import warnings
 from pathlib import Path
 
 import joblib
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.model_selection import train_test_split
@@ -28,6 +32,8 @@ warnings.filterwarnings("ignore")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 MODELS_DIR   = PROJECT_ROOT / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
+VISUALIZATION_DIR = PROJECT_ROOT / "visualizations"
+VISUALIZATION_DIR.mkdir(parents=True, exist_ok=True)
 
 sys.path.insert(0, str(PROJECT_ROOT))
 from config.config import get_db_engine
@@ -226,11 +232,40 @@ def train(df: pd.DataFrame):
     y = df_ml[TARGET]
 
     # ==========================================================
-    # SPLIT DATA
+    # SPLIT DATA PER TID BERDASARKAN WAKTU (TIME-SERIES SPLIT)
     # ==========================================================
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
-    )
+    # Data ATM bersifat temporal, sehingga split acak tidak ideal.
+    # Kita urutkan tiap terminal berdasarkan updated dan ambil 80% awal
+    # untuk train serta 20% terakhir untuk test, menjaga urutan waktu.
+    df_ml = df_ml.sort_values(["tid", DT_COL]).reset_index(drop=True)
+
+    train_frames = []
+    test_frames = []
+
+    for tid, group in df_ml.groupby("tid", sort=False):
+        group = group.sort_values(DT_COL).copy()
+        if len(group) < 2:
+            train_frames.append(group)
+            continue
+
+        cutoff = max(1, int(len(group) * 0.8))
+        train_frames.append(group.iloc[:cutoff])
+        if len(group) > cutoff:
+            test_frames.append(group.iloc[cutoff:])
+
+    if not test_frames:
+        raise ValueError(
+            "Tidak cukup data per TID untuk melakukan time-series split. "
+            "Pastikan tiap terminal memiliki minimal 2 record waktu yang cukup."
+        )
+
+    train_df = pd.concat(train_frames, ignore_index=True)
+    test_df = pd.concat(test_frames, ignore_index=True)
+
+    X_train = train_df[FITUR_ML]
+    y_train = train_df[TARGET]
+    X_test = test_df[FITUR_ML]
+    y_test = test_df[TARGET]
 
     # ==========================================================
     # SCALING
@@ -298,9 +333,50 @@ def train(df: pd.DataFrame):
         'feature': FITUR_ML,
         'importance': importances
     }).sort_values('importance', ascending=False)
-    
+
+    def categorize_feature(feature_name: str) -> str:
+        name = feature_name.lower()
+        if any(k in name for k in ["sisa_pagu", "ratas_harian", "selisih_lmb", "total_lmb", "pagu_existing"]):
+            return "Balance & usage"
+        if any(k in name for k in ["is_weekend", "is_payday", "is_holiday", "days_to_payday", "days_since_payday", "holiday_count_next_7", "payday_cluster_flag", "near_holiday"]):
+            return "Calendar & event"
+        if any(k in name for k in ["rolling_", "trend_", "cum_prev_", "event_uplift"]):
+            return "Trend & history"
+        if any(k in name for k in ["lag_", "weekday", "hari_", "bulan_", "kuartal", "tahun"]):
+            return "Temporal & lag"
+        if any(k in name for k in ["weekend_x_", "payday_x_", "holiday_x_", "sample_weight_event"]):
+            return "Interaction features"
+        return "Other"
+
+    feature_importance["group"] = feature_importance["feature"].apply(categorize_feature)
+
+    top20 = feature_importance.head(20).sort_values("importance", ascending=True)
+    fig, ax = plt.subplots(figsize=(10, 8))
+    ax.barh(top20["feature"], top20["importance"], color=sns.color_palette("viridis", len(top20)))
+    ax.invert_yaxis()
+    ax.set_title("Feature Importance — Top 20")
+    ax.set_xlabel("Importance")
+    ax.set_ylabel("Feature")
+    fig.tight_layout()
+    fig.savefig(VISUALIZATION_DIR / "06_feature_importance_top20.png", dpi=200)
+    plt.close(fig)
+
+    group_summary = (
+        feature_importance.groupby("group", as_index=False)["importance"].sum()
+        .sort_values("importance", ascending=False)
+    )
+    fig, ax = plt.subplots(figsize=(10, 6))
+    sns.barplot(data=group_summary, x="importance", y="group", palette="viridis", ax=ax)
+    ax.set_title("Feature Importance by Group")
+    ax.set_xlabel("Total Importance")
+    ax.set_ylabel("Feature Group")
+    fig.tight_layout()
+    fig.savefig(VISUALIZATION_DIR / "07_feature_importance_by_group.png", dpi=200)
+    plt.close(fig)
+
     print("\nTOP 5 FEATURE IMPORTANCE:")
     print(feature_importance.head(5).to_string(index=False))
+    print(f"\nVisualisasi feature importance disimpan di: {VISUALIZATION_DIR}")
 
     return model, scaler
 

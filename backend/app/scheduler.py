@@ -44,7 +44,7 @@ def job_predict_realtime() -> None:
     dengan data terbaru per TID. Job ini berjalan setiap {PREDICT_INTERVAL_HOURS} jam.
     """
     logger.info("[Scheduler] Memulai prediksi realtime...")
-    
+    7
     # Pastikan scripts/ ada di sys.path
     scripts_path = PROJECT_ROOT / "scripts"
     if str(scripts_path) not in sys.path:
