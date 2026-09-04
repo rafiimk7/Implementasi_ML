@@ -35,66 +35,6 @@ logger = logging.getLogger(__name__)
 # Update list ini setiap tahun sebagai safety net
 # ---------------------------------------------------------------------------
 FALLBACK_HOLIDAYS = {
-    2024: [
-        date(2024, 1, 1),   # New Year's Day
-        date(2024, 2, 8),   # Ascension of the Prophet Muhammad
-        date(2024, 2, 9),   # Chinese New Year Joint Holiday
-        date(2024, 2, 10),  # Chinese New Year's Day
-        date(2024, 2, 14),  # Election Day
-        date(2024, 3, 11),  # Bali's Day of Silence / Nyepi
-        date(2024, 3, 12),  # Joint Holiday Nyepi
-        date(2024, 3, 29),  # Good Friday
-        date(2024, 3, 31),  # Easter Sunday
-        date(2024, 4, 8),   # Idul Fitri Joint Holiday
-        date(2024, 4, 9),   # Idul Fitri Joint Holiday
-        date(2024, 4, 10),  # Idul Fitri
-        date(2024, 4, 11),  # Holiday
-        date(2024, 4, 12),  # Joint Holiday
-        date(2024, 4, 15),  # Holiday
-        date(2024, 5, 1),   # International Labor Day
-        date(2024, 5, 9),   # Ascension Day of Jesus Christ
-        date(2024, 5, 10),  # Joint Holiday Ascension Day
-        date(2024, 5, 23),  # Waisak Day
-        date(2024, 5, 24),  # Joint Holiday Waisak Day
-        date(2024, 6, 1),   # Pancasila Day
-        date(2024, 6, 17),  # Idul Adha
-        date(2024, 6, 18),  # Joint Holiday Idul Adha
-        date(2024, 7, 7),   # Muharram / Islamic New Year
-        date(2024, 8, 17),  # Indonesian Independence Day
-        date(2024, 9, 16),  # Maulid Nabi Muhammad
-        date(2024, 12, 25), # Christmas Day
-        date(2024, 12, 26), # Boxing Day
-    ],
-    2025: [
-        date(2025, 1, 1),   # New Year's Day
-        date(2025, 1, 27),  # Ascension of the Prophet Muhammad
-        date(2025, 1, 28),  # Chinese New Year Joint Holiday
-        date(2025, 1, 29),  # Chinese New Year's Day
-        date(2025, 3, 28),  # Joint Holiday Nyepi
-        date(2025, 3, 29),  # Bali's Day of Silence / Nyepi
-        date(2025, 3, 31),  # Idul Fitri
-        date(2025, 4, 1),   # Idul Fitri Holiday
-        date(2025, 4, 2),   # Idul Fitri Joint Holiday
-        date(2025, 4, 3),   # Idul Fitri Joint Holiday
-        date(2025, 4, 4),   # Idul Fitri Joint Holiday
-        date(2025, 4, 7),   # Idul Fitri Joint Holiday
-        date(2025, 4, 18),  # Good Friday
-        date(2025, 4, 20),  # Easter Sunday
-        date(2025, 5, 1),   # International Labor Day
-        date(2025, 5, 12),  # Waisak Day
-        date(2025, 5, 13),  # Joint Holiday Waisak Day
-        date(2025, 5, 29),  # Ascension Day of Jesus Christ
-        date(2025, 5, 30),  # Joint Holiday Ascension Day
-        date(2025, 6, 1),   # Pancasila Day
-        date(2025, 6, 6),   # Idul Adha
-        date(2025, 6, 9),   # Joint Holiday Idul Adha
-        date(2025, 6, 27),  # Muharram / Islamic New Year
-        date(2025, 8, 17),  # Indonesian Independence Day
-        date(2025, 8, 18),  # Indonesian Independence Day Observed
-        date(2025, 9, 5),   # Maulid Nabi Muhammad
-        date(2025, 12, 25), # Christmas Day
-        date(2025, 12, 26), # Boxing Day
-    ],
     2026: [
         date(2026, 1, 1),   # New Year's Day
         date(2026, 1, 16),  # Ascension of the Prophet Muhammad
@@ -214,7 +154,6 @@ def is_payday(d: date, payday_config: str = "25") -> bool:
         bool
     """
     return d == get_payday_date(d.year, d.month, payday_config)
-
 
 # ===========================================================================
 # 4. GET_HOLIDAYS (dengan caching DB) — akan dilengkapi di Task 2
@@ -588,4 +527,4 @@ def add_calendar_flags(
         df["is_near_holiday_3d"].sum(),
     )
 
-    return df
+    return df 

@@ -40,10 +40,12 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from config.config import get_db_engine
 from calendar_features import add_calendar_flags
 
-# Tabel sumber data realtime (sesuaikan jika berbeda)
-REALTIME_TABLE   = os.getenv("SOURCE_TABLE", "data_maret2026")  # bisa di-override via env var
-PREPROCESS_TABLE = "preprocessing"
-PREDICTION_TABLE = "hasil_prediksi"
+# Tabel sumber data realtime untuk inferensi HARUS memakai hasil preprocessing,
+# bukan tabel raw dari .env atau dataset mentah.
+# Ini penting agar fitur model yang dilatih cocok dengan data yang diprediksi.
+REALTIME_TABLE   = os.getenv("REALTIME_TABLE") or "preprocessing"
+PREPROCESS_TABLE = os.getenv("PREPROCESS_TABLE") or "preprocessing"
+PREDICTION_TABLE = os.getenv("PREDICTION_TABLE") or "hasil_prediksi"
 DT_COL           = "updated"
 
 # Konfigurasi fitur kalender cerdas (harus konsisten dengan data_preprocessing.py)
@@ -56,30 +58,25 @@ print(f"[CONFIG] PAYDAY_DATE         : {PAYDAY_DATE}")
 print(f"[CONFIG] HOLIDAY_COUNTRY     : {HOLIDAY_COUNTRY}")
 print(f"[CONFIG] CALENDARIFIC_API_KEY: {'*SET*' if CALENDARIFIC_API_KEY else '(tidak diset — pakai fallback)'}")
 
-# Fitur harus sama persis dengan yang dipakai saat training (17 fitur)
-FITUR_ML = [
-    # Fitur balance & usage
-    "sisa_pagu",
-    "ratas_harian",
-    "selisih_lmb",
-    # Fitur kalender dasar
-    "hari",
-    "bulan",
-    "tahun",
-    "hari_ke",
-    "kuartal",
-    # Cyclic encoding
-    "hari_sin",
-    "hari_cos",
-    "bulan_sin",
-    "bulan_cos",
-    "hari_ke_sin",
-    "hari_ke_cos",
-    # Fitur kalender cerdas (is_* = 0/1 flag)
-    "is_weekend",
-    "is_payday",
-    "is_holiday",
-]
+# Fitur harus sama persis dengan yang dipakai saat training.
+# Kita tidak hardcode lagi, melainkan memuat daftar fitur dari file model yang
+# sudah disimpan oleh `train_model.py` agar inferensi tetap konsisten.
+def get_model_feature_list():
+    feature_file = MODELS_DIR / "fitur.pkl"
+    if feature_file.exists():
+        return joblib.load(feature_file)
+
+    # fallback: gunakan definisi yang sama dari train_model.py jika model belum ada
+    try:
+        from train_model import FITUR_ML
+        return FITUR_ML
+    except Exception:
+        raise FileNotFoundError(
+            "File model belum dibuat. Jalankan train_model.py terlebih dahulu."
+        )
+
+
+FITUR_ML = get_model_feature_list()
 
 
 # ==========================================================
@@ -88,11 +85,12 @@ FITUR_ML = [
 
 def load_realtime_data() -> pd.DataFrame:
     """
-    Membaca record terbaru per TID dari tabel realtime.
-    Menggunakan subquery MAX(updated) untuk efisiensi.
+    Membaca record terbaru per TID dari tabel preprocessing.
+    Karena model dilatih pada fitur yang sudah terbentuk di preprocessing,
+    inferensi harus memakai data hasil preprocessing yang sama.
     """
     print("=" * 70)
-    print("LOAD DATA REALTIME")
+    print("LOAD DATA PREPROCESSING TERBARU")
     print("=" * 70)
 
     query = f"""
@@ -109,8 +107,8 @@ def load_realtime_data() -> pd.DataFrame:
 
     engine = get_db_engine()
     df = pd.read_sql(query, con=engine)
-    print(f"Data realtime dimuat : {len(df)} TID, {len(df.columns)} kolom")
-    print(f"Timestamp terbaru    : {df[DT_COL].max() if not df.empty else 'Tidak ada data'}")
+    print(f"Data preprocessing dimuat : {len(df)} TID, {len(df.columns)} kolom")
+    print(f"Timestamp terbaru          : {df[DT_COL].max() if not df.empty else 'Tidak ada data'}")
     return df
 
 
@@ -120,43 +118,32 @@ def load_realtime_data() -> pd.DataFrame:
 
 def load_historis_data() -> pd.DataFrame:
     """
-    Mengambil ratas_harian dan selisih_lmb terbaru per TID dari tabel preprocessing.
-    Mengambil record dengan tanggal terakhir untuk setiap TID.
+    Mengambil record terbaru dari tabel preprocessing agar data inferensi
+    mengikuti satu snapshot per TID yang sama dengan model dilatih.
     """
     query = f"""
-        SELECT 
-            p.tid,
-            p.ratas_harian,
-            p.selisih_lmb,
-            p.tanggal AS tanggal_historis
-        FROM {PREPROCESS_TABLE} p
+        SELECT t.*
+        FROM {PREPROCESS_TABLE} t
         INNER JOIN (
-            SELECT tid, MAX(tanggal) AS max_tanggal
+            SELECT tid, MAX(updated) AS max_updated
             FROM {PREPROCESS_TABLE}
-            WHERE ratas_harian > 0
             GROUP BY tid
         ) latest
-        ON p.tid = latest.tid
-        AND p.tanggal = latest.max_tanggal
+        ON t.tid = latest.tid
+        AND t.updated = latest.max_updated
     """
     try:
         engine = get_db_engine()
         df_hist = pd.read_sql(query, con=engine)
-        
-        # Jika ada duplikat TID (multiple records di tanggal yang sama), ambil yang pertama
-        df_hist = df_hist.drop_duplicates(subset=["tid"], keep="first")
-        
         print(f"Data historis dimuat untuk {len(df_hist)} TID")
         if not df_hist.empty:
             print(f"  Rata-rata ratas_harian: {df_hist['ratas_harian'].mean():.1f}")
             print(f"  Rata-rata selisih_lmb : {df_hist['selisih_lmb'].mean():.1f}")
-            print(f"  Tanggal historis terakhir: {df_hist['tanggal_historis'].max()}")
-        
+            print(f"  Tanggal historis terakhir: {df_hist['updated'].max()}")
         return df_hist
     except Exception as e:
         print(f"Tabel preprocessing tidak tersedia atau kosong: {e}")
-        print("  ratas_harian dan selisih_lmb akan diestimasi dari data realtime.")
-        return pd.DataFrame(columns=["tid", "ratas_harian", "selisih_lmb", "tanggal_historis"])
+        return pd.DataFrame()
 
 
 # ==========================================================
@@ -165,150 +152,41 @@ def load_historis_data() -> pd.DataFrame:
 
 def preprocess_realtime(df: pd.DataFrame, df_hist: pd.DataFrame) -> pd.DataFrame:
     """
-    Preprocessing minimal untuk data realtime:
-    - Konversi tipe data
-    - Hitung total_lmb & sisa_pagu
-    - Gabungkan ratas_harian dan selisih_lmb dari historis
-    - Feature engineering dari kolom updated
+    Validasi dan persiapan data hasil preprocessing untuk inferensi.
+    Data yang masuk ke fungsi ini sudah merupakan output dari `data_preprocessing.py`
+    dan sudah memiliki semua fitur yang dibutuhkan model.
     """
     print("\n" + "=" * 70)
-    print("PREPROCESSING REALTIME")
+    print("VALIDASI DATA PREPROCESSING")
     print("=" * 70)
 
     if df.empty:
-        raise ValueError("Tidak ada data realtime untuk diprediksi.")
+        raise ValueError("Tidak ada data preprocessing untuk diprediksi.")
 
-    # ----------------------------------------------------------
-    # KONVERSI TIPE DATA
-    # ----------------------------------------------------------
-    # DB memiliki dua format updated:
-    #   "01 Apr 2026 07:45"      → string lokal
-    #   "2026-04-01 00:15:15"    → ISO datetime
-    # format="mixed" di pandas 2.x menangani keduanya sekaligus
-    df[DT_COL] = pd.to_datetime(df[DT_COL], format="mixed", dayfirst=True, errors="coerce")
+    df = df.copy()
+    df[DT_COL] = pd.to_datetime(df[DT_COL], errors="coerce")
     df["tanggal"] = df[DT_COL].dt.date
 
-    kolom_lmb = ["lmb1", "lmb2", "lmb3", "lmb4"]
-    df[kolom_lmb] = (
-        df[kolom_lmb]
-        .apply(pd.to_numeric, errors="coerce")
-        .fillna(0)
-    )
-    df["pagu_existing"] = (
-        pd.to_numeric(df["pagu_existing"], errors="coerce")
-        .fillna(0)
-    )
-
-    # ----------------------------------------------------------
-    # HITUNG TOTAL LMB & SISA PAGU
-    # ----------------------------------------------------------
-    df["total_lmb"] = df[kolom_lmb].sum(axis=1)
-    df["sisa_pagu"] = (
-        df["pagu_existing"] - df["total_lmb"]
-    ).clip(lower=0).astype(int)
-
-    # ----------------------------------------------------------
-    # GABUNGKAN RATAS_HARIAN & SELISIH_LMB DARI HISTORIS
-    # ----------------------------------------------------------
-    if not df_hist.empty:
-        # Merge dengan data historis - LEFT JOIN
-        df = df.merge(
-            df_hist[["tid", "ratas_harian", "selisih_lmb"]],
-            on="tid",
-            how="left"
+    missing_cols = [col for col in FITUR_ML if col not in df.columns]
+    if missing_cols:
+        raise ValueError(
+            "Data preprocessing tidak memiliki kolom fitur model: "
+            f"{missing_cols}. Jalankan data_preprocessing.py / train_model.py terlebih dahulu."
         )
-        
-        print(f"  Berhasil merge data historis untuk {df['ratas_harian'].notna().sum()} TID")
-    else:
-        # Jika tidak ada data historis, buat kolom kosong
-        df["ratas_harian"] = np.nan
-        df["selisih_lmb"] = np.nan
 
-    # ----------------------------------------------------------
-    # FALLBACK UNTUK TID BARU / TANPA HISTORIS
-    # ----------------------------------------------------------
-    # Untuk TID baru yang tidak ada di historis:
-    # 1. ratas_harian = rata-rata dari TID yang ada, atau estimasi dari sisa_pagu / 7 hari
-    # 2. selisih_lmb = rata-rata dari TID yang ada, atau estimasi dari total_lmb * 0.3
-    
-    tid_tanpa_historis = df["ratas_harian"].isna().sum()
-    if tid_tanpa_historis > 0:
-        print(f"  ⚠️ {tid_tanpa_historis} TID tidak ada di historis, menggunakan estimasi fallback")
-        
-        # Hitung rata-rata dari TID yang ada historis
-        mean_ratas = df[df["ratas_harian"].notna()]["ratas_harian"].mean()
-        mean_selisih = df[df["selisih_lmb"].notna()]["selisih_lmb"].mean()
-        
-        if pd.isna(mean_ratas) or mean_ratas <= 0:
-            # Jika semua TID baru, gunakan asumsi default konservatif
-            mean_ratas = max(1, df["sisa_pagu"].mean() / 7) if df["sisa_pagu"].mean() > 0 else 50000
-        
-        if pd.isna(mean_selisih) or mean_selisih <= 0:
-            # Estimasi selisih dari total_lmb (asumsi 30% dari total dipakai per hari)
-            mean_selisih = max(1, df["total_lmb"].mean() * 0.3) if df["total_lmb"].mean() > 0 else 30000
-        
-        # Fill NA dengan estimasi
-        df.loc[df["ratas_harian"].isna(), "ratas_harian"] = np.ceil(mean_ratas)
-        df.loc[df["selisih_lmb"].isna(), "selisih_lmb"] = np.ceil(mean_selisih)
+    for col in FITUR_ML:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Pastikan tidak ada nilai 0, negatif, NaN, atau inf
-    df["ratas_harian"] = df["ratas_harian"].replace([0, np.inf, -np.inf], np.nan).fillna(1)
-    df["selisih_lmb"] = df["selisih_lmb"].replace([0, np.inf, -np.inf], np.nan).fillna(1)
-    
-    df["ratas_harian"] = np.ceil(np.maximum(df["ratas_harian"], 1)).astype(int)
-    df["selisih_lmb"] = np.ceil(np.maximum(df["selisih_lmb"], 1)).astype(int)
-
-    # ----------------------------------------------------------
-    # VALIDASI SISA PAGU
-    # ----------------------------------------------------------
-    # Jika sisa_pagu = 0, prediksi akan selalu 0 hari
-    # Beri peringatan
-    zero_sisa = (df["sisa_pagu"] == 0).sum()
-    if zero_sisa > 0:
-        print(f"  ⚠️ {zero_sisa} TID memiliki sisa_pagu = 0 (saldo habis)")
-
-    # ----------------------------------------------------------
-    # FEATURE ENGINEERING DARI KOLOM UPDATED
-    # ----------------------------------------------------------
-    df["hari"]    = df[DT_COL].dt.day
-    df["bulan"]   = df[DT_COL].dt.month
-    df["tahun"]   = df[DT_COL].dt.year
-    df["hari_ke"] = df[DT_COL].dt.dayofyear
-
-    # -- Kuartal --
-    df["kuartal"] = df[DT_COL].dt.quarter
-
-    # -- Cyclic encoding --
-    df["hari_sin"]    = np.sin(2 * np.pi * df["hari"]    / 31)
-    df["hari_cos"]    = np.cos(2 * np.pi * df["hari"]    / 31)
-    df["bulan_sin"]   = np.sin(2 * np.pi * df["bulan"]   / 12)
-    df["bulan_cos"]   = np.cos(2 * np.pi * df["bulan"]   / 12)
-    df["hari_ke_sin"] = np.sin(2 * np.pi * df["hari_ke"] / 365)
-    df["hari_ke_cos"] = np.cos(2 * np.pi * df["hari_ke"] / 365)
-
-    # ----------------------------------------------------------
-    # FITUR KALENDER CERDAS (is_weekend, is_payday, is_holiday)
-    # Harus konsisten dengan yang dihasilkan data_preprocessing.py
-    # ----------------------------------------------------------
-    engine = get_db_engine()
-    df = add_calendar_flags(
-        df,
-        dt_col=DT_COL,
-        engine=engine,
-        payday_config=PAYDAY_DATE,
-        api_key=CALENDARIFIC_API_KEY,
-        country=HOLIDAY_COUNTRY,
-    )
+    # jika ada missing value di fitur model, isi dengan median per kolom
+    for col in FITUR_ML:
+        if df[col].isna().any():
+            median_val = df[col].median()
+            df[col] = df[col].fillna(median_val)
 
     print(f"\nPreprocessing selesai : {len(df)} record siap diprediksi")
-    print(f"  Rata-rata ratas_harian: {df['ratas_harian'].mean():.1f}")
-    print(f"  Rata-rata selisih_lmb : {df['selisih_lmb'].mean():.1f}")
-    print(f"  Rata-rata sisa_pagu   : {df['sisa_pagu'].mean():.0f}")
     print(f"  Jumlah fitur siap     : {len(FITUR_ML)}")
-    print(f"  is_weekend            : {df['is_weekend'].sum()} ATM")
-    print(f"  is_payday             : {df['is_payday'].sum()} ATM")
-    print(f"  is_holiday            : {df['is_holiday'].sum()} ATM")
-    
+    print(f"  Kolom utama           : {['tid', DT_COL, 'sisa_pagu', 'ratas_harian']}")
     return df
 
 
@@ -343,6 +221,18 @@ def load_model():
 # 5. PREDIKSI
 # ==========================================================
 
+def assign_threshold(df: pd.DataFrame) -> pd.DataFrame:
+    """Menetapkan status threshold berdasarkan prediksi_hari."""
+    df = df.copy()
+    df["threshold"] = pd.cut(
+        df["prediksi_hari"],
+        bins=[-1, 1, 2, 3, float("inf")],
+        labels=["🔴 Kritis", "🟠 Tinggi", "🟡 Sedang", "🟢 Aman"],
+        right=True,
+    )
+    return df
+
+
 def predict(df: pd.DataFrame, model, scaler, fitur: list) -> pd.DataFrame:
     """Menjalankan prediksi jumlah_hari dan menghitung tanggal_habis."""
     print("\n" + "=" * 70)
@@ -356,15 +246,15 @@ def predict(df: pd.DataFrame, model, scaler, fitur: list) -> pd.DataFrame:
 
     # Siapkan data untuk prediksi
     X = df[fitur].copy()
-    
+
     # Handle missing values di X
     for col in fitur:
         if X[col].isna().any():
             median_val = X[col].median() if len(X) > 0 else 0
-            X[col] = X[col].fillna(median_val)
-    
+            X[col] = X[col].fillna(median_val) 
+
     X_scaled = scaler.transform(X)
-    
+
     # Prediksi
     prediksi_hari = np.ceil(model.predict(X_scaled)).astype(int)
     prediksi_hari = np.maximum(prediksi_hari, 0)  # Tidak boleh negatif
@@ -377,13 +267,9 @@ def predict(df: pd.DataFrame, model, scaler, fitur: list) -> pd.DataFrame:
     ).dt.strftime("%d-%m-%Y")
 
     df["prediksi_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
+
     # Tambahkan threshold untuk monitoring
-    df["threshold"] = pd.cut(
-        df["prediksi_hari"],
-        bins=[-1, 1, 2, 3, float('inf')],
-        labels=['🔴 Kritis', '🟠 Tinggi', '🟡 Sedang', '🟢 Aman']
-    )
+    df = assign_threshold(df)
 
     # Tampilkan hasil
     kolom_tampil = [
@@ -432,7 +318,7 @@ def save_predictions(df: pd.DataFrame) -> None:
         "prediksi_hari",
         "tanggal_habis",
         "threshold",
-        "prediksi_at",
+        "prediksi_at", 
     ]
     kolom_ada = [k for k in kolom_simpan if k in df.columns]
     
@@ -491,24 +377,25 @@ def apply_business_rule_fallback(df: pd.DataFrame) -> pd.DataFrame:
     print("\n" + "=" * 70)
     print("BUSINESS RULE FALLBACK")
     print("=" * 70)
-    
+
     # Business rule: ceil(sisa_pagu / ratas_harian)
+    df = df.copy()
     df["business_rule_hari"] = (
         np.ceil(
-            df["sisa_pagu"] / 
+            df["sisa_pagu"] /
             df["ratas_harian"].replace(0, np.nan)
         )
         .fillna(0)
         .astype(int)
     )
-    
+
     # Jika prediksi model terlalu jauh dari business rule, gunakan business rule
     if "prediksi_hari" in df.columns:
         diff = np.abs(df["prediksi_hari"] - df["business_rule_hari"])
         # Hindari division by zero
         denominator = df["business_rule_hari"].replace(0, 1)
         diff_pct = (diff / denominator) * 100
-        
+
         # Jika prediksi model menyimpang > 50%, gunakan business rule
         gunakan_business_rule = diff_pct > 50
         if gunakan_business_rule.any():
@@ -518,7 +405,9 @@ def apply_business_rule_fallback(df: pd.DataFrame) -> pd.DataFrame:
                 pd.to_datetime(df.loc[gunakan_business_rule, DT_COL]) +
                 pd.to_timedelta(df.loc[gunakan_business_rule, "business_rule_hari"], unit="D")
             ).dt.strftime("%d-%m-%Y")
-    
+
+    # Recompute threshold setelah prediksi bisa berubah oleh fallback.
+    df = assign_threshold(df)
     return df
 
 
@@ -540,10 +429,10 @@ def main():
             print("❌ Tidak ada data realtime untuk diprediksi.")
             return None
 
-        # 2. Load data historis dari tabel preprocessing
+        # 2. Load data terbaru dari tabel preprocessing (output hasil feature engineering)
         df_hist = load_historis_data()
 
-        # 3. Preprocessing ringan + feature engineering
+        # 3. Validasi dan cek fitur sesuai model dilatih.
         df_ready = preprocess_realtime(df_realtime, df_hist)
 
         # 4. Load model dari disk

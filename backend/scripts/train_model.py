@@ -38,7 +38,7 @@ VISUALIZATION_DIR.mkdir(parents=True, exist_ok=True)
 sys.path.insert(0, str(PROJECT_ROOT))
 from config.config import get_db_engine
 
-PREPROCESS_TABLE = "preprocessing"
+PREPROCESS_TABLE = "preprocessing1"
 PREDICTION_TABLE = "hasil_prediksi"
 DT_COL           = "updated"
 

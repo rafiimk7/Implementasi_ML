@@ -26,7 +26,9 @@
         {{-- HEADER --}}
         <div class="mb-6">
             <h1 class="text-2xl font-bold text-gray-800">Dashboard Prediksi Tanggal Habis Saldo ATM</h1>
-            <p class="text-gray-500 mt-1 text-sm">Monitoring prediksi saldo ATM berbasis machine learning.<strong class="text-gray-600"Klik></p>
+            <p class="text-gray-500 mt-1 text-sm">
+                Monitoring prediksi saldo ATM berbasis machine learning dan fitur kalender untuk event seperti payday, weekend, dan tanggal merah.
+            </p>
         </div>
 
         @php
@@ -34,15 +36,51 @@
             $data      = $prediction['data'] ?? [];
             $total     = $prediction['count'] ?? count($data);
             $lastUpdate = $prediction['last_update'] ?? now()->format('d M Y, H:i');
-            
-            // Threshold berdasarkan business rule (sama dengan di predict_realtime.py)
-            $kritisDay = 2;  // ATM kritis jika habis dalam <= 2 hari
-            $waspDay   = 4;  // ATM waspada jika habis dalam <= 4 hari
 
-            // Hitung statistik berdasarkan threshold
-            $kritis  = collect($data)->filter(fn($r) => isset($r['prediksi_hari']) && $r['prediksi_hari'] <= $kritisDay)->count();
-            $waspada = collect($data)->filter(fn($r) => isset($r['prediksi_hari']) && $r['prediksi_hari'] > $kritisDay && $r['prediksi_hari'] <= $waspDay)->count();
-            $aman    = collect($data)->filter(fn($r) => isset($r['prediksi_hari']) && $r['prediksi_hari'] > $waspDay)->count();
+            // Threshold business rule yang konsisten dengan backend:
+            // Kritis: <= 1 hari, Waspada: <= 3 hari, Aman: > 3 hari.
+            // Ini menjaga suksesi status tetap sinkron dengan data `threshold` yang diproduksi oleh predict_realtime.py.
+            $kritisDay = 1;
+            $waspDay   = 3;
+
+            $resolveStatus = function ($row) use ($kritisDay, $waspDay) {
+                $thresholdRaw = isset($row['threshold']) ? trim((string) $row['threshold']) : null;
+                $prediksiHari = $row['prediksi_hari'] ?? null;
+
+                if ($thresholdRaw !== null && $thresholdRaw !== '') {
+                    $thresholdLower = strtolower($thresholdRaw);
+                    if (str_contains($thresholdLower, 'kritis')) {
+                        return ['status' => 'kritis', 'label' => '🔴 Kritis', 'badgeClass' => 'bg-red-100 text-red-700'];
+                    }
+                    if (str_contains($thresholdLower, 'tinggi')) {
+                        return ['status' => 'waspada', 'label' => '🟠 Waspada', 'badgeClass' => 'bg-yellow-100 text-yellow-700'];
+                    }
+                    if (str_contains($thresholdLower, 'sedang')) {
+                        return ['status' => 'waspada', 'label' => '🟡 Waspada', 'badgeClass' => 'bg-yellow-100 text-yellow-700'];
+                    }
+                    if (str_contains($thresholdLower, 'aman')) {
+                        return ['status' => 'aman', 'label' => '🟢 Aman', 'badgeClass' => 'bg-green-100 text-green-700'];
+                    }
+                }
+
+                if (is_numeric($prediksiHari)) {
+                    $hari = (int) $prediksiHari;
+                    if ($hari <= $kritisDay) {
+                        return ['status' => 'kritis', 'label' => '🔴 Kritis', 'badgeClass' => 'bg-red-100 text-red-700'];
+                    }
+                    if ($hari <= $waspDay) {
+                        return ['status' => 'waspada', 'label' => '🟠 Waspada', 'badgeClass' => 'bg-yellow-100 text-yellow-700'];
+                    }
+                    return ['status' => 'aman', 'label' => '🟢 Aman', 'badgeClass' => 'bg-green-100 text-green-700'];
+                }
+
+                return ['status' => 'unknown', 'label' => 'N/A', 'badgeClass' => 'bg-gray-100 text-gray-500'];
+            };
+
+            // Hitung statistik berdasarkan status final yang sudah konsisten dengan backend
+            $kritis  = collect($data)->filter(fn($r) => ($resolveStatus)($r)['status'] === 'kritis')->count();
+            $waspada = collect($data)->filter(fn($r) => ($resolveStatus)($r)['status'] === 'waspada')->count();
+            $aman    = collect($data)->filter(fn($r) => ($resolveStatus)($r)['status'] === 'aman')->count();
 
             // Rata-rata prediksi hari
             $rataHari = $total > 0
@@ -141,14 +179,16 @@
                     </p>
                 </div>
                 <div class="flex items-center gap-2">
+                    <label for="searchInput" class="sr-only">Cari TID</label>
                     <input
                         type="text"
                         id="searchInput"
                         placeholder="Cari TID..."
                         class="text-sm border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-400 w-48"
                         onkeyup="filterTable()"
+                        aria-label="Cari TID"
                     >
-                    <select id="filterStatus" class="text-sm border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-400" onchange="filterTable()">
+                    <select id="filterStatus" class="text-sm border border-gray-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-400" onchange="filterTable()" aria-label="Filter status">
                         <option value="all">Semua Status</option>
                         <option value="kritis">🔴 Kritis</option>
                         <option value="waspada">🟠 Waspada</option>
@@ -189,28 +229,15 @@
                         <tbody class="divide-y divide-gray-100" id="tableBody">
                             @foreach($data as $i => $row)
                                 @php
+                                    $statusMeta = ($resolveStatus)($row);
+                                    $status = $statusMeta['status'];
+                                    $badgeClass = $statusMeta['badgeClass'];
+                                    $rowClass = $status === 'kritis' ? 'bg-red-50' : ($status === 'waspada' ? 'bg-yellow-50' : '');
+                                    $label = $statusMeta['label'];
                                     $hari = $row['prediksi_hari'] ?? null;
-                                    if ($hari === null) {
-                                        $status = 'unknown';
-                                        $badgeClass = 'bg-gray-100 text-gray-500';
-                                        $rowClass   = '';
-                                        $label      = 'N/A';
-                                    } elseif ($hari <= $kritisDay) {
-                                         $status = 'kritis';
-                                        $badgeClass = 'bg-red-100 text-red-700';
-                                        $rowClass   = 'bg-red-50';
-                                        $label      = '🔴 Kritis';
-                                    } elseif ($hari <= $waspDay) {
-                                        $status = 'waspada';
-                                        $badgeClass = 'bg-yellow-100 text-yellow-700';
-                                        $rowClass   = 'bg-yellow-50';
-                                        $label      = '🟠 Waspada';
-                                    } else {
-                                        $status = 'aman';
-                                        $badgeClass = 'bg-green-100 text-green-700';
-                                        $rowClass   = '';
-                                        $label      = '🟢 Aman';
-                                    }
+                                    $thresholdText = isset($row['threshold']) && $row['threshold'] !== null && $row['threshold'] !== ''
+                                        ? (string) $row['threshold']
+                                        : ($hari !== null ? ($hari <= $kritisDay ? '🔴 Kritis' : ($hari <= $waspDay ? '🟠 Waspada' : '🟢 Aman')) : 'N/A');
                                 @endphp
                                 <tr class="hover:bg-blue-50 transition-colors {{ $rowClass }}" data-status="{{ $status }}">
                                     <td class="px-4 py-3 text-gray-400">{{ $i + 1 }}</td>
@@ -243,6 +270,9 @@
                                     </td>
                                     <td class="px-4 py-3 text-center font-medium text-gray-700">
                                         {{ $row['tanggal_habis'] ?? '-' }}
+                                    </td>
+                                    <td class="px-4 py-3 text-center font-medium text-gray-700">
+                                        {{ $thresholdText }}
                                     </td>
                                     <td class="px-4 py-3 text-center">
                                         <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold {{ $badgeClass }}">
@@ -281,10 +311,10 @@
         {{-- Tambahan: Informasi Model --}}
         <div class="mt-6 bg-white rounded-xl shadow-sm border border-gray-200 p-4">
             <div class="flex flex-wrap items-center justify-between gap-2 text-xs text-gray-500">
-                <div class="flex items-center gap-4">
+                <div class="flex items-center gap-4 flex-wrap">
                     <span class="font-medium text-gray-700">ℹ️ Informasi Sistem</span>
-                    <span>Model: <span class="font-mono text-gray-600">RandomForestRegressor</span></span>
-                    <span>Jumlah Fitur: <span class="font-mono text-gray-600">14</span></span>
+                    <span>Model: <span class="font-mono text-gray-600">LightGBMRegressor / RandomForestRegressor</span></span>
+                    <span>Jumlah Fitur: <span class="font-mono text-gray-600">40+</span></span>
                 </div>
             </div>
         </div>

@@ -72,11 +72,11 @@ Python ML Pipeline
 
 ### 4.2 Komponen Utama
 
-- Frontend: Laravel + Blade + Tailwind CSS
+- Frontend: Laravel + Blade + Tailwind CSS (dashboard, pencarian TID, filter status)
 - Backend: FastAPI + Python
-- Scheduler: APScheduler
+- Scheduler: APScheduler (job prediksi realtime + retraining mingguan)
 - Database: MySQL
-- ML: Random Forest Regressor
+- ML: LightGBM (prioritas) dengan RandomForest sebagai fallback
 
 ---
 
@@ -163,9 +163,13 @@ Saat ini pendekatan yang dipakai adalah kombinasi antara business rule dan model
 
 ### 6.1 Model
 
-- Algoritma: RandomForestRegressor
-- Tujuan: memprediksi jumlah hari sampai saldo ATM habis
-- Output: `prediksi_hari`, `tanggal_habis`, dan status ATM
+- Algoritma utama: `LGBMRegressor` (LightGBM) — dipakai bila library tersedia
+- Fallback: `RandomForestRegressor` (scikit-learn) bila LightGBM tidak tersedia atau gagal
+- Parameter default (LightGBM): `n_estimators=500`, `max_depth=8`, `learning_rate=0.05`, `random_state=42`
+- Parameter default (RandomForest fallback): `n_estimators=200`, `max_depth=8`, `min_samples_split=10`, `min_samples_leaf=5`
+- Tujuan: memprediksi `jumlah_hari` → menghasilkan `prediksi_hari`, `tanggal_habis`, dan `threshold/status` untuk dashboard
+
+Catatan: model menggunakan `StandardScaler` untuk scaling fitur numerik sebelum training dan memanfaatkan `sample_weight_event` bila tersedia untuk menekankan window event.
 
 ### 6.2 Keunggulan Pendekatan Ini
 
@@ -182,10 +186,12 @@ Backend saat ini sudah memiliki scheduler otomatis melalui `app.scheduler`.
 
 Job yang aktif meliputi:
 
-- prediksi realtime untuk memperbarui hasil prediksi secara periodik
-- retraining model secara berkala berdasarkan jadwal mingguan
+- Prediksi realtime untuk memperbarui `hasil_prediksi` secara periodik (default: setiap `PREDICT_INTERVAL_MINUTES=15` menit, dengan siklus raw data → preprocessing → prediksi)
+- Retraining model secara berkala (default: setiap minggu pada `RETRAIN_DAY_OF_WEEK=sun` dan `RETRAIN_HOUR=2` WIB)
 
-Scheduler diaktifkan saat API startup dan dihentikan saat shutdown aplikasi.
+Parameter ini dapat diatur lewat environment variables: `PREDICT_INTERVAL_MINUTES`, `RETRAIN_DAY_OF_WEEK`, `RETRAIN_HOUR`.
+
+Scheduler dibuat saat API startup (lifespan) dan dihentikan saat shutdown aplikasi.
 
 ---
 
@@ -214,7 +220,17 @@ Dashboard ini dipakai untuk visualisasi operasional dan membantu tim mengambil k
 
 ---
 
-## 9. Struktur Project Saat Ini
+## 9. Panduan Teknis Singkat
+
+Panduan detail dapat ditemukan di [TECHNICAL_GUIDE.md](../TECHNICAL_GUIDE.md). File ini memuat:
+
+- alur runtime raw data → preprocessing → model → prediksi
+- konfigurasi environment dan database
+- jadwal scheduler dan pola retraining
+- command untuk menjalankan preprocessing, training, dan inference manual
+- troubleshooting dan checklist operational
+
+## 10. Struktur Project Saat Ini
 
 ```text
 Prediksi_ATM1/
@@ -262,7 +278,7 @@ Proyek saat ini sudah berkembang ke arah sistem yang lebih lengkap dibandingkan 
 - scheduler otomatis sudah aktif
 - dashboard frontend sudah terhubung ke API
 - preprocessing dan feature engineering sudah lebih kompleks
-- kalender cerdas sudah ditambahkan
+- Feature sudah ditambahkan
 - fallback holiday management sudah ada sebagai pengaman
 
 Yang masih menjadi fokus pengembangan lanjutan:
