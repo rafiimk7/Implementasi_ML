@@ -1,22 +1,19 @@
 """
-Data Preprocessing Script for ATM Prediction
----------------------------------------------
-Membaca dataset dari database MySQL (via config/config.py),
-melakukan preprocessing + feature engineering,
-dan menyimpan hasilnya ke tabel `preprocessing` di database.
+Data Preprocessing — ATM Prediction
+--------------------------------------
+Membaca data mentah dari MySQL, melakukan preprocessing + feature engineering,
+dan menyimpan hasilnya ke tabel `preprocessing`.
 
-PENDEKATAN:
-- Sistem menggunakan Business Rule-Based ML
-- Target training = jumlah_hari (hasil kalkulasi: ceil(sisa_pagu / ratas_harian))
-- Target ini BUKAN ground truth dari refill events, tapi estimasi dari rumus bisnis
-- Model ML akan belajar dari pattern ini dan menangkap pola temporal (hari/bulan/kuartal)
+Pendekatan:
+  - Business Rule-Based ML: target = ceil(sisa_pagu / ratas_harian)
+  - Model belajar pola temporal, kalender, dan interaksi fitur dari target ini.
 
-OUTPUT:
-- Tabel `preprocessing` dengan:
-  * Fitur numerik: sisa_pagu, ratas_harian, selisih_lmb
-  * Fitur temporal: hari, bulan, tahun, hari_ke, kuartal, cyclic encoding
-  * Fitur kalender cerdas: is_weekend, is_payday, is_holiday  ← BARU
-  * Target: jumlah_hari (business rule calculation sebagai target training)
+Output:
+  - Tabel `preprocessing` berisi 48+ fitur siap training:
+    * Balance & usage : sisa_pagu, ratas_harian, selisih_lmb
+    * Temporal        : hari, bulan, tahun, hari_ke, kuartal, cyclic encoding
+    * Kalender cerdas : is_weekend, is_payday, is_holiday
+    * Target          : jumlah_hari
 """
 
 import sys
@@ -26,11 +23,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from sqlalchemy import BigInteger, Date, DateTime, Float, Integer, SmallInteger, String
-
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-import seaborn as sns
 
 # Tambahkan root project dan folder scripts ke sys.path agar config + helper lokal bisa diimport
 PROJECT_ROOT = os.path.dirname(os.path.dirname(__file__))
@@ -55,7 +47,7 @@ DT_COL       = "updated"        # kolom datetime utama
 
 # Konfigurasi fitur kalender cerdas
 PAYDAY_DATE          = os.getenv("PAYDAY_DATE", "25")           # "25" atau "last_workday"
-CALENDARIFIC_API_KEY = os.getenv("CALENDARIFIC_API_KEY", "ix341jES8qMP90wDJkUz3u0KFWryqa47")    # API key dari calendarific.com
+CALENDARIFIC_API_KEY = os.getenv("CALENDARIFIC_API_KEY", "")       # API key dari calendarific.com
 HOLIDAY_COUNTRY      = os.getenv("HOLIDAY_COUNTRY", "ID")       # kode negara ISO-3166
 
 print(f"[CONFIG] SOURCE_TABLE        : {SOURCE_TABLE}")
@@ -156,7 +148,7 @@ def preprocess(df: pd.DataFrame) -> pd.DataFrame:
         .drop_duplicates(subset=["tid", DT_COL])
         .reset_index(drop=True)
     )
-
+    
     # ----------------------------------------------------------
     # HITUNG SELISIH LMB
     # ----------------------------------------------------------
@@ -315,13 +307,20 @@ def preprocess(df: pd.DataFrame) -> pd.DataFrame:
     # ----------------------------------------------------------
     df_harian = df_harian.sort_values(["tid", "tanggal"]).reset_index(drop=True)
 
-    df_harian["jumlah_hari"] = (
-        np.ceil(
-            df_harian["sisa_pagu"] /
-            df_harian["ratas_harian"].replace(0, np.nan)
-        )
+    # Jika sisa_pagu < ratas_harian, ATM habis hari ini (0 hari).
+    # Jika sisa_pagu >= ratas_harian, hasil final = int(sisa_pagu / ratas_harian) - 1
+    # agar tidak ada float dan tanggal_habis mengikuti jumlah_hari yang sudah dipotong 1.
+    _jumlah_hari_raw = (
+        (df_harian["sisa_pagu"] /
+         df_harian["ratas_harian"].replace(0, np.nan))
         .fillna(0)
+        .astype(float)
         .astype(int)
+    )
+    df_harian["jumlah_hari"] = np.where(
+        df_harian["sisa_pagu"] < df_harian["ratas_harian"],
+        0,
+        np.maximum(_jumlah_hari_raw - 1, 0),
     )
 
     df_harian["tanggal_habis"] = (
@@ -609,7 +608,7 @@ def main():
     engine = get_db_engine()
     result = feature_engineering(result, engine=engine)
 
-    # 4. Simpan ke tabel 'preprocessing1' di database
+    # 4. Simpan ke tabel 'preprocessing' di database
     save_to_db(result)
 
     print("\n" + "=" * 70)

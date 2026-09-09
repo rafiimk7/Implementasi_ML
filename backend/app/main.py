@@ -42,7 +42,7 @@ app = FastAPI(
     version="1.0.0",
     description=(
         "API untuk mengakses hasil prediksi tanggal habis saldo ATM. "
-        "Prediksi diperbarui secara on-demand via POST /api/refresh. "
+        "Prediksi diperbarui otomatis setiap 15 menit via scheduler incremental. "
         "Model dilatih ulang otomatis setiap minggu."
     ),
     lifespan=lifespan,

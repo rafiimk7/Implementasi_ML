@@ -63,8 +63,8 @@ Pengelola ATM tidak dapat memantau secara akurat kapan setiap mesin akan kehabis
 ```mermaid
 flowchart LR
     DB[(MySQL\nPT_BGI)] -->|data_2026| PP[data_preprocessing.py]
-    PP -->|preprocessing1| TM[train_model.py]
-    PP -->|preprocessing1| PR[predict_realtime.py]
+    PP -->|preprocessing| TM[train_model.py]
+    PP -->|preprocessing| PR[predict_realtime.py]
     TM -->|model + scaler + fitur.pkl| PR
     PR -->|hasil_prediksi| API
     CAL[Calendarific API] -.->|libur nasional| PP
@@ -189,11 +189,11 @@ backend/app/
 | Tabel | Fungsi | Dibuat oleh |
 |---|---|---|
 | `data_2026` | Data mentah ATM (sumber) | Sistem eksternal / import |
-| `preprocessing1` | Hasil ETL + feature engineering | `data_preprocessing.py` |
+| `preprocessing` | Hasil ETL + feature engineering | `data_preprocessing.py` |
 | `hasil_prediksi` | Hasil prediksi terbaru per TID | `predict_realtime.py` / `train_model.py` |
 | `holiday_cache` | Cache libur nasional dari Calendarific API | `calendar_features.py` |
 
-> ⚠️ **Catatan nama tabel:** `data_preprocessing.py` menyimpan output ke tabel bernama `preprocessing1` (konstanta `OUTPUT_TABLE = "preprocessing1"`). Sementara itu, `predict_realtime.py` membaca dari variabel `REALTIME_TABLE` dan `PREPROCESS_TABLE` yang secara default bernilai `"preprocessing"`. Pastikan environment variable `REALTIME_TABLE` dan `PREPROCESS_TABLE` di `.env` diisi sesuai nama tabel yang dihasilkan oleh preprocessing.
+> ⚠️ **Catatan nama tabel:** `data_preprocessing.py` menyimpan output ke tabel bernama `preprocessing` (konstanta `OUTPUT_TABLE = "preprocessing"`). Sementara itu, `predict_realtime.py` membaca dari variabel `REALTIME_TABLE` dan `PREPROCESS_TABLE` yang secara default bernilai `"preprocessing"`. Pastikan environment variable `REALTIME_TABLE` dan `PREPROCESS_TABLE` di `.env` diisi sesuai nama tabel yang dihasilkan oleh preprocessing.
 
 ---
 
@@ -275,7 +275,7 @@ Prediksi_ATM1/
 │   │   └── fitur.pkl                   ← list nama fitur (urutan harus konsisten)
 │   ├── scripts/
 │   │   ├── calendar_features.py        ← fitur kalender: is_weekend, is_payday, is_holiday
-│   │   ├── data_preprocessing.py       ← ETL + feature engineering → tabel preprocessing1
+│   │   ├── data_preprocessing.py       ← ETL + feature engineering → tabel preprocessing
 │   │   ├── train_model.py              ← training LightGBM/RF, evaluasi, simpan model
 │   │   └── predict_realtime.py         ← inferensi data terbaru → tabel hasil_prediksi
 │   ├── tests/
@@ -336,10 +336,10 @@ data_preprocessing.py
   - Tambahkan fitur kalender (is_weekend, is_payday, is_holiday, dll.)
   - Tambahkan interaction features
         ↓
-Tabel preprocessing1 (MySQL)
+Tabel preprocessing (MySQL)
         ↓
 train_model.py (dijalankan saat pertama kali / tiap Minggu)
-  - Load dari preprocessing1
+  - Load dari preprocessing
   - Validasi target business rule
   - Time-series split 80/20 per TID
   - StandardScaler → LGBMRegressor (fallback: RandomForestRegressor)
@@ -347,7 +347,7 @@ train_model.py (dijalankan saat pertama kali / tiap Minggu)
   - Simpan: model_prediksi_habis.pkl, scaler.pkl, fitur.pkl
         ↓
 predict_realtime.py (dijalankan tiap 15 menit)
-  - Load data terbaru per TID dari preprocessing1
+  - Load data terbaru per TID dari preprocessing
   - Validasi fitur sesuai fitur.pkl
   - StandardScaler.transform → model.predict
   - Hitung tanggal_habis, tentukan threshold
@@ -529,7 +529,7 @@ $$\text{tanggal\_habis} = \text{updated} + \text{jumlah\_hari hari}$$
 
 ### Tahap 10 — Simpan ke Database
 
-- Disimpan ke tabel `preprocessing1` menggunakan `df.to_sql(..., if_exists='replace', ...)`
+- Disimpan ke tabel `preprocessing` menggunakan `df.to_sql(..., if_exists='replace', ...)`
 - Tabel selalu di-replace setiap kali script dijalankan
 - Dtype setiap kolom dipetakan secara eksplisit ke tipe SQLAlchemy (BIGINT, Integer, SmallInteger, Float, String, Date, DateTime)
 
@@ -694,7 +694,7 @@ Digunakan jika `import lightgbm` gagal atau LightGBM error saat training.
 
 ### Input
 
-48 fitur dari tabel `preprocessing1` (lihat [Bagian 8](#8-feature-engineering)).
+48 fitur dari tabel `preprocessing` (lihat [Bagian 8](#8-feature-engineering)).
 
 ### Target
 
@@ -816,7 +816,7 @@ Dipanggil otomatis oleh scheduler setiap `PREDICT_INTERVAL_MINUTES` menit (defau
 ### Alur Prediksi Realtime
 
 ```
-1. Load data terbaru per TID dari preprocessing1
+1. Load data terbaru per TID dari preprocessing
    (query: SELECT * per TID dengan MAX(updated))
         ↓
 2. Validasi fitur
@@ -895,9 +895,9 @@ APScheduler `BackgroundScheduler` diinisialisasi dengan `timezone="Asia/Jakarta"
 Tahap 1/2: preprocess_main()
   - Baca data raw dari SOURCE_TABLE
   - ETL + feature engineering
-  - Simpan ke preprocessing1
+  - Simpan ke preprocessing
 Tahap 2/2: predict_main()
-  - Load data terbaru per TID dari preprocessing1
+  - Load data terbaru per TID dari preprocessing
   - Prediksi dengan model
   - Simpan ke hasil_prediksi
 ```
@@ -908,7 +908,7 @@ Tahap 2/2: predict_main()
 Tahap 1/2: preprocess_main()
   - Sama dengan di atas
 Tahap 2/2: train_main()
-  - Load dari preprocessing1
+  - Load dari preprocessing
   - Time-series split, training ulang model
   - Simpan model baru ke disk
   - Prediksi data terbaru, simpan ke hasil_prediksi
@@ -1143,7 +1143,7 @@ Data mentah ATM. Kolom yang digunakan oleh sistem:
 
 ---
 
-### Tabel `preprocessing1` (Hasil ETL)
+### Tabel `preprocessing` (Hasil ETL)
 
 Dibuat/di-replace oleh `data_preprocessing.py`. Berisi seluruh fitur yang dibutuhkan model.
 
@@ -1181,14 +1181,14 @@ Kolom utama:
 
 ```sql
 -- Load semua data preprocessing
-SELECT * FROM preprocessing1;
+SELECT * FROM preprocessing;
 
 -- Load data terbaru per TID (untuk prediksi realtime)
 SELECT t.*
-FROM preprocessing1 t
+FROM preprocessing t
 INNER JOIN (
     SELECT tid, MAX(updated) AS max_updated
-    FROM preprocessing1
+    FROM preprocessing
     GROUP BY tid
 ) latest ON t.tid = latest.tid AND t.updated = latest.max_updated;
 ```
@@ -1718,10 +1718,10 @@ Endpoint ini dapat digunakan oleh monitoring tools (uptime robot, Prometheus pro
 | `Can't connect to MySQL server` | Service MySQL tidak berjalan atau credential salah | Cek `sudo systemctl status mysql`; verifikasi `DB_*` di `.env` |
 | `Tabel '...' tidak ditemukan` di API | Tabel `hasil_prediksi` belum dibuat | Jalankan `python3 scripts/predict_realtime.py` atau `python3 scripts/train_model.py` |
 | Dashboard kosong / `error` di frontend | Backend tidak berjalan di port 8001 | Jalankan `uvicorn app.main:app --port 8001` |
-| Feature mismatch saat prediksi | `fitur.pkl` tidak sinkron dengan kolom `preprocessing1` | Jalankan ulang `train_model.py` setelah mengubah fitur di `data_preprocessing.py` |
+| Feature mismatch saat prediksi | `fitur.pkl` tidak sinkron dengan kolom `preprocessing` | Jalankan ulang `train_model.py` setelah mengubah fitur di `data_preprocessing.py` |
 | `selisih_lmb` semua 0 | Tidak ada diferensial dalam satu hari (hanya 1 record per hari per TID) | Data memang 1 snapshot per hari; selisih dihitung antar record dalam hari yang sama |
 | Calendarific API gagal | API key salah / expired / quota habis | Cek key di [calendarific.com](https://calendarific.com), sistem akan fallback ke `FALLBACK_HOLIDAYS` |
-| Inkonsistensi nama tabel `preprocessing` vs `preprocessing1` | `data_preprocessing.py` simpan ke `preprocessing1` tapi `predict_realtime.py` default baca dari `preprocessing` | Set `REALTIME_TABLE=preprocessing1` dan `PREPROCESS_TABLE=preprocessing1` di `.env` |
+| Inkonsistensi nama tabel `preprocessing` vs `preprocessing` | `data_preprocessing.py` simpan ke `preprocessing` tapi `predict_realtime.py` default baca dari `preprocessing` | Set `REALTIME_TABLE=preprocessing` dan `PREPROCESS_TABLE=preprocessing` di `.env` |
 | Training gagal: `Tidak cukup data per TID` | Tiap TID butuh minimal 2 record berbeda waktu | Pastikan data source memiliki histori lebih dari 1 hari per TID |
 
 ---
@@ -1745,9 +1745,9 @@ data_preprocessing.py
   ⑩ Calendar flags: is_weekend, is_payday, is_holiday, near_holiday, days_to/since_payday
   ⑪ Interaction features: weekend_x_ratas, payday_x_sisa_pagu, holiday_x_ratas, ...
   ⑫ Sample weight: event_uplift, sample_weight_event
-        ↓ df.to_sql("preprocessing1", if_exists="replace")
+        ↓ df.to_sql("preprocessing", if_exists="replace")
 
-Tabel preprocessing1 (MySQL — 48+ fitur siap training)
+Tabel preprocessing (MySQL — 48+ fitur siap training)
         ↓
 
 train_model.py (dijalankan manual atau tiap Minggu 02.00)
@@ -1764,7 +1764,7 @@ train_model.py (dijalankan manual atau tiap Minggu 02.00)
 models/model_prediksi_habis.pkl + scaler.pkl + fitur.pkl
 
 predict_realtime.py (dijalankan tiap 15 menit)
-  ① Load data terbaru per TID dari preprocessing1
+  ① Load data terbaru per TID dari preprocessing
   ② Validasi kolom fitur sesuai fitur.pkl
   ③ scaler.transform(X) → model.predict(X_scaled)
   ④ prediksi_hari = max(ceil(y_pred), 0)
@@ -1841,7 +1841,7 @@ Sistem Prediksi Tanggal Habis Saldo ATM adalah aplikasi full-stack yang menggabu
 
 **Algoritma:** Model utama adalah LightGBM Regressor dengan 48 fitur yang mencakup statistik rolling window, lag temporal, cyclic encoding waktu, dan fitur kalender cerdas (hari gajian, akhir pekan, libur nasional dari Calendarific API). Target training dihitung dari formula business rule `ceil(sisa_pagu / ratas_harian)`. RandomForestRegressor digunakan sebagai fallback jika LightGBM tidak tersedia.
 
-**Alur data:** Data mentah dari tabel `data_2026` diproses setiap 15 menit oleh scheduler: preprocessing dan feature engineering menghasilkan tabel `preprocessing1`, kemudian model menghasilkan prediksi yang disimpan ke tabel `hasil_prediksi` dan langsung dapat diakses oleh API.
+**Alur data:** Data mentah dari tabel `data_2026` diproses setiap 15 menit oleh scheduler: preprocessing dan feature engineering menghasilkan tabel `preprocessing`, kemudian model menghasilkan prediksi yang disimpan ke tabel `hasil_prediksi` dan langsung dapat diakses oleh API.
 
 **Fitur utama:** Prediksi otomatis tiap 15 menit, retraining model tiap Minggu pukul 02.00 WIB, business rule fallback untuk stabilitas prediksi, klasifikasi status (Kritis/Tinggi/Sedang/Aman), dan dashboard monitoring dengan search, filter, dan sort.
 

@@ -43,35 +43,47 @@
             $kritisDay = 1;
             $waspDay   = 3;
 
-            $resolveStatus = function ($row) use ($kritisDay, $waspDay) {
+            $statusFromHari = function ($hari) {
+                if ($hari === null || $hari === '') {
+                    return 'aman';
+                }
+
+                $h = (int) $hari;
+                if ($h <= 1) {
+                    return 'kritis';
+                }
+                if ($h <= 3) {
+                    return 'waspada';
+                }
+                return 'aman';
+            };
+
+            $resolveStatus = function ($row) use ($statusFromHari, $kritisDay, $waspDay) {
                 $thresholdRaw = isset($row['threshold']) ? trim((string) $row['threshold']) : null;
                 $prediksiHari = $row['prediksi_hari'] ?? null;
+
+                if (is_numeric($prediksiHari)) {
+                    $status = $statusFromHari((float) $prediksiHari);
+                    if ($status === 'kritis') {
+                        return ['status' => 'kritis', 'label' => '🔴 Kritis', 'badgeClass' => 'bg-red-100 text-red-700'];
+                    }
+                    if ($status === 'waspada') {
+                        return ['status' => 'waspada', 'label' => '🟠 Waspada', 'badgeClass' => 'bg-yellow-100 text-yellow-700'];
+                    }
+                    return ['status' => 'aman', 'label' => '🟢 Aman', 'badgeClass' => 'bg-green-100 text-green-700'];
+                }
 
                 if ($thresholdRaw !== null && $thresholdRaw !== '') {
                     $thresholdLower = strtolower($thresholdRaw);
                     if (str_contains($thresholdLower, 'kritis')) {
                         return ['status' => 'kritis', 'label' => '🔴 Kritis', 'badgeClass' => 'bg-red-100 text-red-700'];
                     }
-                    if (str_contains($thresholdLower, 'tinggi')) {
+                    if (str_contains($thresholdLower, 'waspada') || str_contains($thresholdLower, 'tinggi') || str_contains($thresholdLower, 'sedang')) {
                         return ['status' => 'waspada', 'label' => '🟠 Waspada', 'badgeClass' => 'bg-yellow-100 text-yellow-700'];
-                    }
-                    if (str_contains($thresholdLower, 'sedang')) {
-                        return ['status' => 'waspada', 'label' => '🟡 Waspada', 'badgeClass' => 'bg-yellow-100 text-yellow-700'];
                     }
                     if (str_contains($thresholdLower, 'aman')) {
                         return ['status' => 'aman', 'label' => '🟢 Aman', 'badgeClass' => 'bg-green-100 text-green-700'];
                     }
-                }
-
-                if (is_numeric($prediksiHari)) {
-                    $hari = (int) $prediksiHari;
-                    if ($hari <= $kritisDay) {
-                        return ['status' => 'kritis', 'label' => '🔴 Kritis', 'badgeClass' => 'bg-red-100 text-red-700'];
-                    }
-                    if ($hari <= $waspDay) {
-                        return ['status' => 'waspada', 'label' => '🟠 Waspada', 'badgeClass' => 'bg-yellow-100 text-yellow-700'];
-                    }
-                    return ['status' => 'aman', 'label' => '🟢 Aman', 'badgeClass' => 'bg-green-100 text-green-700'];
                 }
 
                 return ['status' => 'unknown', 'label' => 'N/A', 'badgeClass' => 'bg-gray-100 text-gray-500'];
@@ -85,7 +97,7 @@
             // Rata-rata prediksi hari
             $rataHari = $total > 0
                 ? round(collect($data)->avg(fn($r) => $r['prediksi_hari'] ?? 0), 1)
-                : 0;
+                : 0; 
 
             // Rata-rata sisa pagu
             $rataPagu = $total > 0

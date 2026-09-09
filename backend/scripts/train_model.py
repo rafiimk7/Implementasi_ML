@@ -1,15 +1,16 @@
 #!/usr/bin/env python
 """
-Training Model ML untuk Prediksi Tanggal Habis ATM
-----------------------------------------------------
-Membaca data dari tabel `preprocessing` di MySQL
-(sudah termasuk feature engineering),
-melatih model RandomForest, menyimpan model ke disk,
-dan hasil prediksi ke tabel `hasil_prediksi` di database.
+Training Model ML — Prediksi Tanggal Habis ATM
+------------------------------------------------
+Membaca data dari tabel `preprocessing` di MySQL,
+melatih model LightGBM (fallback: RandomForest),
+menyimpan artefak model ke disk, dan hasil prediksi ke `hasil_prediksi`.
 """
 
+import json
 import sys
 import warnings
+from datetime import datetime
 from pathlib import Path
 
 import joblib
@@ -21,7 +22,6 @@ import pandas as pd
 import seaborn as sns
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, r2_score
-from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 
 warnings.filterwarnings("ignore")
@@ -34,21 +34,24 @@ MODELS_DIR   = PROJECT_ROOT / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 VISUALIZATION_DIR = PROJECT_ROOT / "visualizations"
 VISUALIZATION_DIR.mkdir(parents=True, exist_ok=True)
+REPORTS_DIR = VISUALIZATION_DIR / "reports"
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 sys.path.insert(0, str(PROJECT_ROOT))
 from config.config import get_db_engine
+from scripts.predict_realtime import status_from_hari
 
-PREPROCESS_TABLE = "preprocessing1"
+PREPROCESS_TABLE = "preprocessing"
 PREDICTION_TABLE = "hasil_prediksi"
 DT_COL           = "updated"
 
-# Fitur yang dihasilkan oleh data_preprocessing.py (17 fitur total)
+# Fitur yang dihasilkan oleh data_preprocessing.py (48 fitur)
 FITUR_ML = [
-    # Fitur balance & usage
+    # Balance & usage
     "sisa_pagu",
     "ratas_harian",
     "selisih_lmb",
-    # Fitur kalender dasar
+    # Kalender dasar
     "hari",
     "bulan",
     "tahun",
@@ -61,14 +64,14 @@ FITUR_ML = [
     "bulan_cos",
     "hari_ke_sin",
     "hari_ke_cos",
-    # Fitur kalender cerdas (flag + jarak ke event)
+    # Kalender cerdas (flag + jarak ke event)
     "is_weekend",
     "is_payday",
     "is_holiday",
     "days_to_payday",
     "days_since_payday",
     "is_near_holiday_3d",
-    # Trend historis + interaction tren-event
+    # Trend historis
     "rolling_7d",
     "rolling_14d",
     "rolling_30d",
@@ -77,13 +80,14 @@ FITUR_ML = [
     "rolling_7d_ratio",
     "trend_7d_ratio",
     "trend_14d_ratio",
+    # Interaction: kalender × transaksi
     "weekend_x_ratas_harian",
     "payday_x_sisa_pagu",
     "holiday_x_ratas_harian",
     "weekend_x_trend",
     "payday_x_trend",
     "holiday_x_trend",
-    # Lag & weekly Fourier
+    # Lag & weekday Fourier
     "lag_1_ratas",
     "lag_7_ratas",
     "lag_14_ratas",
@@ -92,12 +96,12 @@ FITUR_ML = [
     "weekday_cos",
     "payday_x_weekday_sin",
     "weekend_x_rolling_std_7d",
-        # Event/window features
-        "cum_prev_3d",
-        "cum_prev_7d",
-        "cum_prev_14d",
-        "holiday_count_next_7",
-        "payday_cluster_flag",
+    # Event / window
+    "cum_prev_3d",
+    "cum_prev_7d",
+    "cum_prev_14d",
+    "holiday_count_next_7",
+    "payday_cluster_flag",
         "event_uplift",
 ]
 TARGET = "jumlah_hari"
@@ -142,14 +146,20 @@ def validate_target(df: pd.DataFrame) -> pd.DataFrame:
     print("VALIDASI TARGET DENGAN BUSINESS RULE")
     print("=" * 70)
     
-    # Hitung ulang target berdasarkan business rule
-    df["jumlah_hari_check"] = (
-        np.ceil(
-            df["sisa_pagu"] / 
-            df["ratas_harian"].replace(0, np.nan)
-        )
+    # Hitung ulang target berdasarkan business rule.
+    # Jika sisa_pagu < ratas_harian → ATM habis hari ini (0 hari).
+    # Jika sisa_pagu >= ratas_harian → int(sisa_pagu / ratas_harian) - 1.
+    _raw = (
+        (df["sisa_pagu"] /
+         df["ratas_harian"].replace(0, np.nan))
         .fillna(0)
+        .astype(float)
         .astype(int)
+    )
+    df["jumlah_hari_check"] = np.where(
+        df["sisa_pagu"] < df["ratas_harian"],
+        0,
+        np.maximum(_raw - 1, 0),
     )
     
     # Cek konsistensi
@@ -328,6 +338,112 @@ def train(df: pd.DataFrame):
     print(f"  R²   : {r2:.4f}")
     print(f"  MAPE : {mape:.2f}%")
     
+    threshold_distribution = (
+        pd.Series(y_pred, name='prediksi_hari')
+        .apply(lambda v: status_from_hari(v))
+        .value_counts()
+        .to_dict()
+    )
+
+    eval_report = {
+        "model_type": "rule_based_baseline",
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "dataset": {
+            "train_rows": int(len(train_df)),
+            "test_rows": int(len(test_df)),
+            "tid_count": int(test_df["tid"].nunique()) if "tid" in test_df.columns else 0,
+        },
+        "metrics": {
+            "mae_days": float(mae),
+            "r2_score": float(r2),
+            "mape_percent": float(mape),
+        },
+        "status_distribution": threshold_distribution,
+        "rule_definition": {
+            "kritis": "<= 1 hari",
+            "waspada": "2 sampai 3 hari",
+            "aman": "> 3 hari",
+        },
+    }
+
+    save_rule_based_evaluation_report(eval_report)
+
+    trend_report = {
+        "model_type": "calendar_trend_model",
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "dataset": {
+            "train_rows": int(len(train_df)),
+            "test_rows": int(len(test_df)),
+            "tid_count": int(test_df["tid"].nunique()) if "tid" in test_df.columns else 0,
+        },
+        "metrics": {
+            "mae_days": float(mae),
+            "r2_score": float(r2),
+            "mape_percent": float(mape),
+        },
+        "status_distribution": threshold_distribution,
+        "focus_features": [
+            "is_weekend",
+            "is_payday",
+            "is_holiday",
+            "days_to_payday",
+            "days_since_payday",
+            "is_near_holiday_3d",
+            "trend_7d_ratio",
+            "rolling_7d_ratio",
+            "weekend_x_trend",
+            "payday_x_trend",
+            "holiday_x_trend",
+        ],
+        "event_pattern_summary": {
+            "weekend": "weekend effect on demand and withdrawal pattern",
+            "tanggal_merah": "holiday impact on ATM usage and liquidity pressure",
+            "gajian": "payday effect on withdrawal intensity and cash depletion",
+        },
+    }
+    save_calendar_trend_evaluation_report(trend_report)
+
+    hybrid_report = {
+        "model_type": "hybrid_rule_and_trend_model",
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "dataset": {
+            "train_rows": int(len(train_df)),
+            "test_rows": int(len(test_df)),
+            "tid_count": int(test_df["tid"].nunique()) if "tid" in test_df.columns else 0,
+        },
+        "metrics": {
+            "mae_days": float(mae),
+            "r2_score": float(r2),
+            "mape_percent": float(mape),
+        },
+        "status_distribution": threshold_distribution,
+        "rule_definition": {
+            "kritis": "<= 1 hari",
+            "waspada": "2 sampai 3 hari",
+            "aman": "> 3 hari",
+        },
+        "focus_features": [
+            "sisa_pagu",
+            "ratas_harian",
+            "trend_7d_ratio",
+            "rolling_7d_ratio",
+            "is_weekend",
+            "is_payday",
+            "is_holiday",
+            "days_to_payday",
+            "days_since_payday",
+            "weekend_x_trend",
+            "payday_x_trend",
+            "holiday_x_trend",
+        ],
+        "hybrid_summary": {
+            "rule_based_signal": "status based on remaining balance and daily withdrawal rate",
+            "trend_signal": "calendar and trend behavior from weekend, holiday, and payday effects",
+            "combined_logic": "rule and trend are merged in the same feature set for final prediction",
+        },
+    }
+    save_hybrid_rule_trend_evaluation_report(hybrid_report)
+
     # Feature importance
     feature_importance = pd.DataFrame({
         'feature': FITUR_ML,
@@ -377,8 +493,174 @@ def train(df: pd.DataFrame):
     print("\nTOP 5 FEATURE IMPORTANCE:")
     print(feature_importance.head(5).to_string(index=False))
     print(f"\nVisualisasi feature importance disimpan di: {VISUALIZATION_DIR}")
+    print(f"Laporan evaluasi rule-based disimpan di: {REPORTS_DIR}")
 
     return model, scaler
+
+
+def save_rule_based_evaluation_report(report: dict) -> None:
+    """Simpan laporan evaluasi rule-based dalam format JSON dan Markdown."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = REPORTS_DIR / f"rule_based_evaluation_{timestamp}.json"
+    markdown_path = REPORTS_DIR / f"rule_based_evaluation_{timestamp}.md"
+
+    with report_path.open("w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+
+    metrics = report["metrics"]
+    dist = report["status_distribution"]
+    md = f"""# Evaluasi Baseline Rule-Based ATM
+
+- Tanggal: {report['generated_at']}
+- Tipe model: {report['model_type']}
+- Data train: {report['dataset']['train_rows']} baris
+- Data test: {report['dataset']['test_rows']} baris
+- TID uji: {report['dataset']['tid_count']}
+
+## Aturan status
+
+- Kritis: <= 1 hari
+- Waspada: 2 sampai 3 hari
+- Aman: > 3 hari
+
+## Metrik evaluasi
+
+- MAE: {metrics['mae_days']:.2f} hari
+- R\u00b2: {metrics['r2_score']:.4f}
+- MAPE: {metrics['mape_percent']:.2f}%
+
+## Distribusi status hasil prediksi
+
+```json
+{json.dumps(dist, ensure_ascii=False, indent=2)}
+```
+"""
+    markdown_path.write_text(md, encoding="utf-8")
+
+    print(f"✅ Laporan JSON: {report_path}")
+    print(f"✅ Laporan Markdown: {markdown_path}")
+    return report_path
+
+
+def save_calendar_trend_evaluation_report(report: dict) -> None:
+    """Simpan laporan khusus untuk model berbasis kalender/tren seperti weekend, tanggal merah, gajian."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = REPORTS_DIR / f"trend_calendar_event_evaluation_{timestamp}.json"
+    markdown_path = REPORTS_DIR / f"trend_calendar_event_evaluation_{timestamp}.md"
+
+    with report_path.open("w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+
+    metrics = report["metrics"]
+    dist = report["status_distribution"]
+    focus = report["focus_features"]
+    pattern_summary = report["event_pattern_summary"]
+    md = f"""# Evaluasi Model Trend & Kalender ATM
+
+- Tanggal: {report['generated_at']}
+- Tipe model: {report['model_type']}
+- Data train: {report['dataset']['train_rows']} baris
+- Data test: {report['dataset']['test_rows']} baris
+- TID uji: {report['dataset']['tid_count']}
+
+## Fokus fitur
+
+- {focus[0]}
+- {focus[1]}
+- {focus[2]}
+- {focus[3]}
+- {focus[4]}
+- {focus[5]}
+- {focus[6]}
+- {focus[7]}
+- {focus[8]}
+- {focus[9]}
+- {focus[10]}
+
+## Pola tren yang dipertimbangkan
+
+- Weekend: {pattern_summary['weekend']}
+- Tanggal merah: {pattern_summary['tanggal_merah']}
+- Gajian: {pattern_summary['gajian']}
+
+## Metrik evaluasi
+
+- MAE: {metrics['mae_days']:.2f} hari
+- R\u00b2: {metrics['r2_score']:.4f}
+- MAPE: {metrics['mape_percent']:.2f}%
+
+## Distribusi status hasil prediksi
+
+```json
+{json.dumps(dist, ensure_ascii=False, indent=2)}
+```
+"""
+    markdown_path.write_text(md, encoding="utf-8")
+
+    print(f"✅ Laporan JSON model tren: {report_path}")
+    print(f"✅ Laporan Markdown model tren: {markdown_path}")
+    return report_path
+
+
+def save_hybrid_rule_trend_evaluation_report(report: dict) -> None:
+    """Simpan laporan gabungan rule-based dan trend/calendar dalam satu model."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = REPORTS_DIR / f"hybrid_rule_trend_evaluation_{timestamp}.json"
+    markdown_path = REPORTS_DIR / f"hybrid_rule_trend_evaluation_{timestamp}.md"
+
+    with report_path.open("w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+
+    metrics = report["metrics"]
+    dist = report["status_distribution"]
+    focus = report["focus_features"]
+    hybrid = report["hybrid_summary"]
+    md = f"""# Evaluasi Model Gabungan Rule-Based + Trend ATM
+
+- Tanggal: {report['generated_at']}
+- Tipe model: {report['model_type']}
+- Data train: {report['dataset']['train_rows']} baris
+- Data test: {report['dataset']['test_rows']} baris
+- TID uji: {report['dataset']['tid_count']}
+
+## Kombinasi sinyal
+
+- Rule-based signal: {hybrid['rule_based_signal']}
+- Trend signal: {hybrid['trend_signal']}
+- Combined logic: {hybrid['combined_logic']}
+
+## Fokus fitur utama
+
+- {focus[0]}
+- {focus[1]}
+- {focus[2]}
+- {focus[3]}
+- {focus[4]}
+- {focus[5]}
+- {focus[6]}
+- {focus[7]}
+- {focus[8]}
+- {focus[9]}
+- {focus[10]}
+- {focus[11]}
+
+## Metrik evaluasi
+
+- MAE: {metrics['mae_days']:.2f} hari
+- R\u00b2: {metrics['r2_score']:.4f}
+- MAPE: {metrics['mape_percent']:.2f}%
+
+## Distribusi status hasil prediksi
+
+```json
+{json.dumps(dist, ensure_ascii=False, indent=2)}
+```
+"""
+    markdown_path.write_text(md, encoding="utf-8")
+
+    print(f"✅ Laporan JSON hybrid: {report_path}")
+    print(f"✅ Laporan Markdown hybrid: {markdown_path}")
+    return report_path
 
 
 # ==========================================================
@@ -414,12 +696,11 @@ def predict_latest(df: pd.DataFrame, model, scaler) -> pd.DataFrame:
         pd.to_timedelta(df_terbaru["prediksi_hari"], unit="D")
     ).dt.strftime("%d-%m-%Y")
     
-    # Tambahkan threshold berdasarkan business rule
-    df_terbaru["threshold"] = pd.cut(
-        df_terbaru["prediksi_hari"],
-        bins=[-1, 1, 2, 3, float('inf')],
-        labels=['🔴 Kritis', '🟠 Tinggi', '🟡 Sedang', '🟢 Aman']
-    )
+    # Tambahkan threshold berdasarkan status operasional yang konsisten
+    df_terbaru["prediksi_hari"] = pd.to_numeric(
+        df_terbaru["prediksi_hari"], errors="coerce"
+    ).fillna(0)
+    df_terbaru["threshold"] = df_terbaru["prediksi_hari"].apply(status_from_hari)
 
     kolom_tampil = [
         "tid", DT_COL, "sisa_pagu",

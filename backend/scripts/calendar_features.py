@@ -366,7 +366,7 @@ def _fetch_holidays_with_names(
 
 
 def _load_holidays_from_cache(year: int, engine) -> Set[date]:
-    """Baca holidays dari tabel holiday_cache untuk tahun tertentu."""    """Baca holidays dari tabel holiday_cache untuk tahun tertentu."""
+    """Baca holidays dari tabel holiday_cache untuk tahun tertentu."""
     query = f"SELECT tanggal FROM holiday_cache WHERE tahun = {int(year)}"
     df = pd.read_sql(query, con=engine)
     if df.empty:
