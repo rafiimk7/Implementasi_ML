@@ -54,6 +54,7 @@ DT_COL           = "updated"
 PAYDAY_DATE          = os.getenv("PAYDAY_DATE", "25")
 CALENDARIFIC_API_KEY = os.getenv("CALENDARIFIC_API_KEY", "")
 HOLIDAY_COUNTRY      = os.getenv("HOLIDAY_COUNTRY", "ID")
+BUSINESS_RULE_FALLBACK_ENABLED = os.getenv("BUSINESS_RULE_FALLBACK_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def business_rule_days(sisa_pagu, ratas_harian):
@@ -245,6 +246,21 @@ def load_model():
 # 6. PREDIKSI
 # ==========================================================
 
+def normalize_prediction_days(df: pd.DataFrame) -> pd.DataFrame:
+    """Kurangi prediksi_hari satu hari sebelum dipakai untuk save/output.
+
+    Ini menjaga konsistensi business rule: tanggal_habis dihitung dari hari final
+    yang sudah dikurangi 1, bukan dari nilai mentah model.
+    """
+    df = df.copy()
+    if "prediksi_hari" not in df.columns:
+        return df
+
+    df["prediksi_hari"] = pd.to_numeric(df["prediksi_hari"], errors="coerce").fillna(0)
+    df["prediksi_hari"] = np.maximum(df["prediksi_hari"] - 1, 0).astype(int)
+    return df
+
+
 def assign_threshold(df: pd.DataFrame) -> pd.DataFrame:
     """Tetapkan label status berdasarkan prediksi_hari.
 
@@ -261,13 +277,20 @@ def assign_threshold(df: pd.DataFrame) -> pd.DataFrame:
 
 def apply_business_rule_fallback(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Ganti prediksi dengan business rule jika menyimpang >50%.
+    Jika business rule fallback dinyalakan secara eksplisit, ganti prediksi dengan
+    business rule jika menyimpang >50%. Secara default fallback dimatikan agar
+    model penuh tetap dipakai.
 
     Business rule:
       sisa_pagu < ratas_harian -> 0 hari (habis hari ini)
       selainnya                -> int(sisa_pagu / ratas_harian) - 1
     """
     df = df.copy()
+
+    if not BUSINESS_RULE_FALLBACK_ENABLED:
+        print("  ℹ️  Business rule fallback OFF — memakai full model")
+        return assign_threshold(df)
+
     _raw = (
         (df["sisa_pagu"] / df["ratas_harian"].replace(0, np.nan))
         .fillna(0)
@@ -316,6 +339,7 @@ def predict(df: pd.DataFrame, model, scaler, fitur: list) -> pd.DataFrame:
 
     df = df.copy()
     df["prediksi_hari"] = prediksi_hari
+    df = normalize_prediction_days(df)
     df["tanggal_habis"] = (
         pd.to_datetime(df[DT_COL]) +
         pd.to_timedelta(df["prediksi_hari"], unit="D")
@@ -325,7 +349,7 @@ def predict(df: pd.DataFrame, model, scaler, fitur: list) -> pd.DataFrame:
 
     # Tampilkan ringkasan
     kolom_tampil = ["tid", DT_COL, "sisa_pagu", "ratas_harian",
-                    "prediksi_hari", "tanggal_habis", "threshold"]
+                    "prediksi_hari", "tanggal_habis"]
     kolom_ada = [k for k in kolom_tampil if k in df.columns]
     print("\n📊 HASIL PREDIKSI (20 ATM TERAWAL):")
     print(df[kolom_ada].head(20).to_string())
@@ -334,8 +358,8 @@ def predict(df: pd.DataFrame, model, scaler, fitur: list) -> pd.DataFrame:
     print(f"  Rata-rata prediksi: {df['prediksi_hari'].mean():.1f} hari")
     print(f"  Min prediksi      : {df['prediksi_hari'].min()} hari")
     print(f"  Max prediksi      : {df['prediksi_hari'].max()} hari")
-    print(f"\n📊 DISTRIBUSI THRESHOLD:")
-    print(df["threshold"].value_counts().to_string())
+    print(f"\n📊 DISTRIBUSI STATUS (log only):")
+    print(df["threshold"].value_counts().to_string() if "threshold" in df.columns else "(threshold tidak disimpan)")
 
     return df
 
@@ -356,7 +380,6 @@ def ensure_prediction_table_schema(conn) -> None:
             ratas_harian  INT,
             prediksi_hari INT,
             tanggal_habis VARCHAR(20),
-            threshold     VARCHAR(20),
             prediksi_at   DATETIME
         )
     """))
@@ -391,7 +414,7 @@ def save_predictions(df: pd.DataFrame) -> None:
     kolom_simpan = [
         "tid", DT_COL, "total_lmb", "pagu_existing", "sisa_pagu",
         "ratas_harian", "selisih_lmb", "prediksi_hari", "tanggal_habis",
-        "threshold", "prediksi_at",
+        "prediksi_at",
     ]
     kolom_ada = [k for k in kolom_simpan if k in df.columns]
     df_save   = df[kolom_ada].copy()
@@ -400,7 +423,6 @@ def save_predictions(df: pd.DataFrame) -> None:
     df_save["tid"]           = df_save["tid"].astype(str)
     df_save[DT_COL]          = pd.to_datetime(df_save[DT_COL])
     df_save["tanggal_habis"] = df_save["tanggal_habis"].astype(str)
-    df_save["threshold"]     = df_save["threshold"].astype(str)
     df_save["prediksi_at"]   = pd.to_datetime(df_save["prediksi_at"])
 
     for col in ["total_lmb", "pagu_existing", "sisa_pagu",
@@ -420,7 +442,6 @@ def save_predictions(df: pd.DataFrame) -> None:
         "selisih_lmb":   Integer(),
         "prediksi_hari": Integer(),
         "tanggal_habis": String(20),
-        "threshold":     String(20),
         "prediksi_at":   DateTime(),
     }
     dtype_map = {k: v for k, v in dtype_map.items() if k in df_save.columns}
@@ -509,6 +530,7 @@ def main():
 
         # 7. Business rule fallback
         df_hasil = apply_business_rule_fallback(df_hasil)
+        df_hasil = normalize_prediction_days(df_hasil)
 
         # 8. UPSERT hanya TID terdampak
         save_predictions(df_hasil)

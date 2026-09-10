@@ -37,9 +37,9 @@
             $total     = $prediction['count'] ?? count($data);
             $lastUpdate = $prediction['last_update'] ?? now()->format('d M Y, H:i');
 
-            // Threshold business rule yang konsisten dengan backend:
+            // Aturan status final tunggal untuk semua layer:
             // Kritis: <= 1 hari, Waspada: <= 3 hari, Aman: > 3 hari.
-            // Ini menjaga suksesi status tetap sinkron dengan data `threshold` yang diproduksi oleh predict_realtime.py.
+            // Nilai status dihitung dari prediksi_hari, bukan dari kolom threshold yang disimpan.
             $kritisDay = 1;
             $waspDay   = 3;
 
@@ -59,7 +59,6 @@
             };
 
             $resolveStatus = function ($row) use ($statusFromHari, $kritisDay, $waspDay) {
-                $thresholdRaw = isset($row['threshold']) ? trim((string) $row['threshold']) : null;
                 $prediksiHari = $row['prediksi_hari'] ?? null;
 
                 if (is_numeric($prediksiHari)) {
@@ -71,19 +70,6 @@
                         return ['status' => 'waspada', 'label' => '🟠 Waspada', 'badgeClass' => 'bg-yellow-100 text-yellow-700'];
                     }
                     return ['status' => 'aman', 'label' => '🟢 Aman', 'badgeClass' => 'bg-green-100 text-green-700'];
-                }
-
-                if ($thresholdRaw !== null && $thresholdRaw !== '') {
-                    $thresholdLower = strtolower($thresholdRaw);
-                    if (str_contains($thresholdLower, 'kritis')) {
-                        return ['status' => 'kritis', 'label' => '🔴 Kritis', 'badgeClass' => 'bg-red-100 text-red-700'];
-                    }
-                    if (str_contains($thresholdLower, 'waspada') || str_contains($thresholdLower, 'tinggi') || str_contains($thresholdLower, 'sedang')) {
-                        return ['status' => 'waspada', 'label' => '🟠 Waspada', 'badgeClass' => 'bg-yellow-100 text-yellow-700'];
-                    }
-                    if (str_contains($thresholdLower, 'aman')) {
-                        return ['status' => 'aman', 'label' => '🟢 Aman', 'badgeClass' => 'bg-green-100 text-green-700'];
-                    }
                 }
 
                 return ['status' => 'unknown', 'label' => 'N/A', 'badgeClass' => 'bg-gray-100 text-gray-500'];
@@ -247,9 +233,7 @@
                                     $rowClass = $status === 'kritis' ? 'bg-red-50' : ($status === 'waspada' ? 'bg-yellow-50' : '');
                                     $label = $statusMeta['label'];
                                     $hari = $row['prediksi_hari'] ?? null;
-                                    $thresholdText = isset($row['threshold']) && $row['threshold'] !== null && $row['threshold'] !== ''
-                                        ? (string) $row['threshold']
-                                        : ($hari !== null ? ($hari <= $kritisDay ? '🔴 Kritis' : ($hari <= $waspDay ? '🟠 Waspada' : '🟢 Aman')) : 'N/A');
+                                    $thresholdText = $label !== 'N/A' ? $label : 'N/A';
                                 @endphp
                                 <tr class="hover:bg-blue-50 transition-colors {{ $rowClass }}" data-status="{{ $status }}">
                                     <td class="px-4 py-3 text-gray-400">{{ $i + 1 }}</td>
@@ -286,11 +270,7 @@
                                     <td class="px-4 py-3 text-center font-medium text-gray-700">
                                         {{ $thresholdText }}
                                     </td>
-                                    <td class="px-4 py-3 text-center">
-                                        <span class="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-semibold {{ $badgeClass }}">
-                                            {{ $label }}
-                                        </span>
-                                    </td>
+    
                                     <td class="px-4 py-3 text-center text-xs text-gray-400">
                                         {{ isset($row['prediksi_at'])
                                             ? \Carbon\Carbon::parse($row['prediksi_at'])->format('d/m/Y H:i')

@@ -1,363 +1,418 @@
 # Panduan Teknis — Sistem Prediksi Tanggal Habis Saldo ATM
 
----
+## 1. Ringkasan Proyek
 
-## Daftar Isi
+Proyek ini adalah sistem prediksi tanggal habis saldo ATM yang menggabungkan:
 
-1. [Informasi Umum Sistem](#1-informasi-umum-sistem)
-2. [Arsitektur Sistem](#2-arsitektur-sistem)
-3. [Teknologi dan Library](#3-teknologi-dan-library)
-4. [Struktur Project](#4-struktur-project)
-5. [Flow Sistem Secara Keseluruhan](#5-flow-sistem-secara-keseluruhan)
-6. [Data Input](#6-data-input)
-7. [Data Preprocessing](#7-data-preprocessing)
-8. [Feature Engineering](#8-feature-engineering)
-9. [Algoritma dan Metode Machine Learning](#9-algoritma-dan-metode-machine-learning)
-10. [Business Logic Prediksi](#10-business-logic-prediksi)
-11. [Prediksi Realtime](#11-prediksi-realtime)
-12. [Scheduler dan Automation](#12-scheduler-dan-automation)
-13. [Dokumentasi API](#13-dokumentasi-api)
-14. [API Request-Response Flow](#14-api-request-response-flow)
-15. [JSON Response Schema](#15-json-response-schema)
-16. [Database Logic](#16-database-logic)
-17. [Frontend Flow](#17-frontend-flow)
-18. [Fitur Sistem](#18-fitur-sistem)
-19. [Error Handling](#19-error-handling)
-20. [Security](#20-security)
-21. [Konfigurasi dan Environment](#21-konfigurasi-dan-environment)
-22. [Deployment](#22-deployment)
-23. [Testing](#23-testing)
-24. [Monitoring dan Logging](#24-monitoring-dan-logging)
-25. [Troubleshooting](#25-troubleshooting)
-26. [End-to-End Flow](#26-end-to-end-flow)
-27. [Ringkasan Algoritma](#27-ringkasan-algoritma)
-28. [Ringkasan API](#28-ringkasan-api)
-29. [Ringkasan Sistem](#29-ringkasan-sistem)
+- preprocessing data ATM dari MySQL,
+- feature engineering berbasis kalender dan trend,
+- model machine learning (LightGBM dengan fallback ke RandomForest),
+- rule business logic untuk validasi dan fallback,
+- scheduler otomatis untuk prediksi realtime dan retraining,
+- dashboard Laravel yang menampilkan hasil akhir dari `hasil_prediksi`.
 
----
-
-## 1. Informasi Umum Sistem
-
-### Nama Sistem
-
-**Sistem Prediksi Tanggal Habis Saldo ATM**
-
-### Tujuan Sistem
-
-Memprediksi estimasi tanggal kehabisan saldo pada setiap terminal ATM berdasarkan pola historis penarikan tunai, saldo tersisa, dan fitur kalender cerdas (hari gajian, akhir pekan, libur nasional).
-
-### Permasalahan yang Diselesaikan
-
-Pengelola ATM tidak dapat memantau secara akurat kapan setiap mesin akan kehabisan uang. Tanpa prediksi yang andal, pengisian ulang bisa terlambat dan menyebabkan ATM kosong, atau terlalu sering dilakukan sehingga tidak efisien. Sistem ini memberikan estimasi hari habis beserta status prioritas agar tim operasional dapat merencanakan pengisian secara proaktif.
-
-### Fungsi Utama Sistem
-
-- Memproses data transaksi ATM harian dari database sumber.
-- Mengekstraksi fitur temporal, statistik, dan kalender dari data historis.
-- Melatih model machine learning untuk memprediksi jumlah hari sebelum saldo habis.
-- Menjalankan prediksi otomatis setiap 15 menit dan retraining setiap minggu.
-- Menyajikan hasil prediksi pada dashboard web dengan indikator status prioritas.
-
-### Arsitektur Aplikasi
-
-```mermaid
-flowchart LR
-    DB[(MySQL\nPT_BGI)] -->|data_2026| PP[data_preprocessing.py]
-    PP -->|preprocessing| TM[train_model.py]
-    PP -->|preprocessing| PR[predict_realtime.py]
-    TM -->|model + scaler + fitur.pkl| PR
-    PR -->|hasil_prediksi| API
-    CAL[Calendarific API] -.->|libur nasional| PP
-    CAL -.->|holiday_cache| DB
-
-    subgraph Backend [Backend — FastAPI :8001]
-        API[predictions.py\nrouter]
-        SCHED[APScheduler]
-        SVC[prediction_service.py]
-        API --> SVC
-        SVC --> DB
-        SCHED -->|setiap 15 menit| PP
-        SCHED -->|setiap Minggu 02.00| TM
-    end
-
-    subgraph Frontend [Frontend — Laravel :8000]
-        CTRL[DashboardController]
-        APISVC[ApiService]
-        VIEW[dashboard.blade.php]
-        CTRL --> APISVC
-        APISVC -->|HTTP GET| API
-        CTRL --> VIEW
-    end
-
-    User([Browser]) --> Frontend
-```
-
-### Pembagian Tanggung Jawab
-
-| Komponen | Teknologi | Tanggung Jawab |
-|---|---|---|
-| Frontend | Laravel 13 + Blade + Tailwind CSS | Tampilan dashboard, pemanggilan API, rendering data |
-| Backend/API | FastAPI (Python) | REST API, scheduler otomatis, ML pipeline |
-| Machine Learning | scikit-learn, LightGBM | Preprocessing, training, prediksi |
-| Database | MySQL (database `PT_BGI`) | Penyimpanan data sumber, hasil preprocessing, prediksi, cache kalender |
-| Kalender Eksternal | Calendarific API | Data libur nasional Indonesia per tahun |
+Tujuan utamanya adalah memberi estimasi kapan saldo ATM akan habis agar operasional pengisian dana bisa direncanakan lebih dini dan lebih aman.
 
 ---
 
 ## 2. Arsitektur Sistem
 
-### Frontend
+### 2.1 Backend Python
 
-**Framework:** Laravel 13 (PHP 8.3)
+Backend utama berada di folder `backend`, dan berisi:
 
-**Struktur utama:**
+- `app/main.py` → entrypoint FastAPI
+- `app/scheduler.py` → scheduler APScheduler
+- `app/api/routes/predictions.py` → endpoint API
+- `app/services/prediction_service.py` → query DB ke `hasil_prediksi`
+- `scripts/data_preprocessing.py` → preprocessing dan feature engineering
+- `scripts/train_model.py` → training model dan evaluasi
+- `scripts/predict_realtime.py` → prediksi realtime dan fallback rule
+- `config/config.py` → konfigurasi DB dan environment
 
-```
-frontend/
-├── app/Http/Controllers/DashboardController.php  ← controller utama
-├── app/Services/ApiService.php                   ← HTTP client ke backend
-├── resources/views/dashboard.blade.php           ← tampilan dashboard
-└── routes/web.php                                ← routing
-```
+### 2.2 Frontend Laravel
 
-**Halaman dan fitur:**
-- Satu halaman: Dashboard Prediksi ATM (`GET /`)
-- Summary cards: Total ATM, Rata-rata Sisa Pagu, Kritis, Waspada, Aman
-- Tabel prediksi dengan search by TID, filter by status, sort semua kolom
-- Tidak ada autentikasi user
+Frontend berada di folder `frontend` dan berisi:
 
-**Controller:** `DashboardController`
-- Method `index()`: memanggil `ApiService->getPredictions()`, mengirim data ke view `dashboard`
-- Method `refresh()`: ada di kode tetapi belum diekspos ke route
+- `app/Http/Controllers/DashboardController.php` → ambil data dari API dan kirim ke Blade
+- `app/Services/ApiService.php` → HTTP client ke FastAPI
+- `resources/views/dashboard.blade.php` → tampilan dashboard
 
-**Service:** `ApiService`
-- `getPredictions()`: `GET http://127.0.0.1:8001/api/predictions`
-- `getPredictionByTid(string $tid)`: `GET http://127.0.0.1:8001/api/predictions/{tid}`
+### 2.3 Database
 
-**Route:**
+Database utama yang dipakai saat ini adalah MySQL dengan tabel yang relevan:
 
-```
-GET /  →  DashboardController@index  (name: 'dashboard')
-```
-
-**Cara frontend mendapatkan data:** setiap request halaman `/`, controller memanggil backend API secara sinkron melalui `ApiService` menggunakan Laravel HTTP Client (Guzzle). Data dikembalikan sebagai array PHP dan di-render oleh Blade template.
+- `data_2026` → data raw ATM
+- `preprocessing` → data hasil preprocessing dan feature engineering
+- `hasil_prediksi` → hasil prediksi final per TID
 
 ---
 
-### Backend
+## 3. Alur Sistem yang Benar di Proyek Ini
 
-**Framework:** FastAPI (Python)
+### 3.1 Flow data end-to-end
 
-**Entry point:** `backend/app/main.py`
-- Mendefinisikan aplikasi FastAPI dengan lifespan context manager
-- Saat startup: APScheduler dijalankan
-- Saat shutdown: APScheduler dihentikan
-
-**Struktur API:**
-
+```text
+data_2026 (MySQL)
+    ↓
+preprocessing
+    ↓
+train_model.py
+    ↓
+model + scaler + fitur.pkl
+    ↓
+predict_realtime.py
+    ↓
+hasil_prediksi
+    ↓
+FastAPI /api/predictions
+    ↓
+Laravel dashboard
 ```
-backend/app/
-├── main.py                     ← FastAPI app + lifespan (scheduler)
-├── scheduler.py                ← konfigurasi APScheduler
-├── api/routes/predictions.py   ← endpoint router prefix /api
-└── services/prediction_service.py ← query tabel hasil_prediksi
-```
 
-**Endpoint:** lihat [Bagian 13](#13-dokumentasi-api)
+### 3.2 Penjelasan arahnya
 
-**Service:** `prediction_service.py`
-- `load_predictions()`: membaca seluruh isi tabel `hasil_prediksi` dan mengembalikan list of dict
-- `get_prediction_by_tid(tid)`: membaca satu record berdasarkan TID
-- Semua nilai `Timestamp`, `NaT`, `NaN`, dan tipe numpy dikonversi ke tipe Python native sebelum dikembalikan ke API
-
-**Scheduler:** APScheduler `BackgroundScheduler`, timezone `Asia/Jakarta`. Dua job terdaftar saat API start. Lihat [Bagian 12](#12-scheduler-dan-automation).
-
-**ML Pipeline:**
-1. `scripts/data_preprocessing.py` — ETL + feature engineering
-2. `scripts/train_model.py` — training, evaluasi, simpan model
-3. `scripts/predict_realtime.py` — inferensi data terbaru per TID
-4. `scripts/calendar_features.py` — fitur kalender (dipanggil oleh preprocessing)
+1. Data raw ATM diproses di `data_preprocessing.py`.
+2. Hasil preprocessing disimpan ke tabel `preprocessing`.
+3. Model dilatih ulang dari `preprocessing` menggunakan `train_model.py`.
+4. Saat realtime job berjalan, `predict_realtime.py` membaca data terbaru per TID dari `preprocessing`.
+5. Model memprediksi `prediksi_hari` lalu dikonversi menjadi status operasional.
+6. Jika hasil model terlalu berbeda dari business rule, maka fallback rule diterapkan.
+7. Hasil final di-upsert ke `hasil_prediksi`.
+8. Laravel mengambil data dari `hasil_prediksi` melalui FastAPI.
 
 ---
 
-### Database
+## 4. Preprocessing dan Fitur yang Dipakai
 
-**DBMS:** MySQL (default database: `PT_BGI`)
+File yang bertanggung jawab: `backend/scripts/data_preprocessing.py`
 
-**Tabel yang digunakan:**
+### 4.1 Tujuan preprocessing
 
-| Tabel | Fungsi | Dibuat oleh |
-|---|---|---|
-| `data_2026` | Data mentah ATM (sumber) | Sistem eksternal / import |
-| `preprocessing` | Hasil ETL + feature engineering | `data_preprocessing.py` |
-| `hasil_prediksi` | Hasil prediksi terbaru per TID | `predict_realtime.py` / `train_model.py` |
-| `holiday_cache` | Cache libur nasional dari Calendarific API | `calendar_features.py` |
+Preprocessing bertugas:
 
-> ⚠️ **Catatan nama tabel:** `data_preprocessing.py` menyimpan output ke tabel bernama `preprocessing` (konstanta `OUTPUT_TABLE = "preprocessing"`). Sementara itu, `predict_realtime.py` membaca dari variabel `REALTIME_TABLE` dan `PREPROCESS_TABLE` yang secara default bernilai `"preprocessing"`. Pastikan environment variable `REALTIME_TABLE` dan `PREPROCESS_TABLE` di `.env` diisi sesuai nama tabel yang dihasilkan oleh preprocessing.
+- membaca data ATM harian dari `data_2026`,
+- mengelompokkan per TID,
+- menghitung indikator seperti `total_lmb`, `pagu_existing`, `sisa_pagu`, `ratas_harian`,
+- menghitung feature kalender seperti weekend, holiday, payday,
+- menambahkan feature rolling, lag, cumulative, dan interaction,
+- menyimpan hasilnya ke tabel `preprocessing`.
 
----
+### 4.2 Fitur yang dihasilkan
 
-### External Services
+Beberapa fitur utama yang dipakai model:
 
-#### Calendarific API
+- `sisa_pagu`
+- `ratas_harian`
+- `selisih_lmb`
+- `hari`, `bulan`, `tahun`, `hari_ke`, `kuartal`
+- `is_weekend`, `is_payday`, `is_holiday`
+- `days_to_payday`, `days_since_payday`
+- `rolling_7d`, `rolling_14d`, `rolling_30d`
+- `trend_7d_ratio`, `trend_14d_ratio`
+- `lag_1_ratas`, `lag_7_ratas`, `lag_14_ratas`
+- feature interaction seperti `weekend_x_trend`, `payday_x_trend`, `holiday_x_trend`
 
-| Atribut | Detail |
-|---|---|
-| Tujuan | Mendapatkan daftar libur nasional Indonesia per tahun |
-| Endpoint | `GET https://calendarific.com/api/v2/holidays` |
-| Authentication | API key sebagai query parameter `api_key` |
-| Parameter | `api_key`, `country=ID`, `year`, `type=national` |
-| Timeout | 10 detik |
-| Caching | Hasil disimpan ke tabel `holiday_cache` di MySQL (INSERT IGNORE per tanggal) |
-| Fallback | Jika API gagal atau key kosong, sistem menggunakan `FALLBACK_HOLIDAYS` (hardcode per tahun) |
-
-**Urutan prioritas saat mengambil data libur:**
-1. Tabel `holiday_cache` di database (cache hit)
-2. Calendarific API (jika `CALENDARIFIC_API_KEY` tersedia dan cache miss)
-3. `FALLBACK_HOLIDAYS` (hardcode di `calendar_features.py`)
+Semua fitur ini harus ada pada data yang digunakan untuk training dan inference agar model tetap konsisten.
 
 ---
 
-## 3. Teknologi dan Library
+## 5. Rule Bisnis yang Digunakan
 
-### Backend
+### 5.1 Aturan status final
 
-| Library | Versi | Fungsi |
-|---|---|---|
-| FastAPI | 0.141.1 | Framework REST API |
-| Uvicorn | 0.52.1 | ASGI server |
-| APScheduler | 3.11.3 | Scheduler background job |
-| pandas | 2.3.3 | Manipulasi dan agregasi data |
-| NumPy | 2.2.6 | Komputasi numerik |
-| scikit-learn | 1.7.2 | `StandardScaler`, `RandomForestRegressor`, metrik evaluasi |
-| LightGBM | 4.4.0 | `LGBMRegressor` (model utama) |
-| joblib | 1.5.3 | Serialisasi model (simpan/load `.pkl`) |
-| SQLAlchemy | 2.0.51 | ORM / koneksi database |
-| PyMySQL | 1.1.3 | Driver MySQL untuk SQLAlchemy |
-| requests | 2.32.3 | HTTP client untuk Calendarific API |
-| python-dotenv | 1.0.1 | Load environment variable dari `.env` |
-| matplotlib | ≥3.9.0 | Visualisasi feature importance (training) |
-| seaborn | ≥0.13.0 | Visualisasi feature importance (training) |
+Aturan status yang dipakai secara konsisten adalah:
 
-### Frontend
+- `<= 1 hari` → `🔴 Kritis`
+- `2 sampai 3 hari` → `🟠 Waspada`
+- `> 3 hari` → `🟢 Aman`
 
-| Library | Versi | Fungsi |
-|---|---|---|
-| laravel/framework | ^13.8 | Framework PHP |
-| PHP | ^8.3 | Bahasa pemrograman |
-| Tailwind CSS | ^4.0.0 | Utility-first CSS framework |
-| Vite | ^8.0.0 | Build tool frontend |
-| laravel-vite-plugin | ^3.1 | Integrasi Vite dengan Laravel |
-| Laravel HTTP Client | built-in | HTTP request ke backend (berbasis Guzzle) |
-| Carbon | built-in | Formatting tanggal di Blade template |
+Implementasinya ada di `backend/scripts/predict_realtime.py` dengan fungsi:
+
+- `status_from_hari(hari)`
+
+Ini adalah sumber status yang seharusnya dipakai di semua layer untuk menjaga konsistensi.
+
+### 5.2 Rule business-day untuk fallback
+
+Fungsi `business_rule_days(sisa_pagu, ratas_harian)` menghitung estimasi hari habis sebagai berikut:
+
+- kalau `sisa_pagu < ratas_harian` → `0`
+- kalau `sisa_pagu >= ratas_harian` → `int(sisa_pagu / ratas_harian) - 1`
+
+Di `apply_business_rule_fallback()` logic-nya adalah:
+
+- hitung `business_rule_hari`
+- hitung selisih absolut terhadap `prediksi_hari`
+- hitung persentase selisih relatif terhadap `business_rule_hari`
+- jika persentase selisih `> 50%`, maka prediksi model diganti dengan `business_rule_hari`
+
+Artinya, fallback ini hanya terjadi untuk kasus yang benar-benar jauh dari rule bisnis, bukan untuk semua TID.
+
+### 5.3 Catatan penting: satu sumber aturan
+
+Untuk menjaga hasil dashboard sama dengan hasil scheduler/backend, aturan status harus dipakai di satu fungsi tunggal. Di proyek saat ini, yang dipakai sebagai sumber utama adalah `status_from_hari()`, lalu frontend di dashboard memprioritaskan `prediksi_hari` sebelum membaca `threshold` string.
 
 ---
 
-## 4. Struktur Project
+## 6. Model yang Dipakai
 
+### 6.1 Algoritma
+
+Pada training, model utama adalah:
+
+- `LightGBMRegressor`
+
+Jika LightGBM tidak tersedia atau gagal, maka fallback ke:
+
+- `RandomForestRegressor`
+
+Proses scaling menggunakan:
+
+- `StandardScaler`
+
+### 6.2 Tahapan training
+
+Di `train_model.py`, training dijalankan melalui beberapa tahapan:
+
+1. load data dari `preprocessing`
+2. validasi target dengan rule bisnis
+3. cleaning dan handling missing value
+4. time-series split per TID
+5. scaling fitur
+6. training model
+7. evaluasi: MAE, R², MAPE
+8. simpan model ke `backend/models/`
+
+Model yang disimpan di folder `backend/models/` meliputi:
+
+- `model_prediksi_habis.pkl`
+- `scaler.pkl`
+- `fitur.pkl`
+
+---
+
+## 7. Prediksi Realtime
+
+File utama: `backend/scripts/predict_realtime.py`
+
+### 7.1 Job realtime
+
+Prediksi realtime berjalan melalui fungsi:
+
+- `main()`
+
+Prosesnya:
+
+1. baca record terbaru per TID dari tabel `preprocessing`
+2. validasi fitur yang dipakai model
+3. load model dan scaler dari disk
+4. lakukan `model.predict()`
+5. konversi hasil ke `prediksi_hari`
+6. hitung `tanggal_habis`
+7. assign `threshold` berdasarkan `status_from_hari()`
+8. apply fallback rule jika selisih lebih dari 50%
+9. upsert hasil ke `hasil_prediksi`
+
+### 7.2 Output yang disimpan
+
+Kolom utama yang dipakai untuk dashboard adalah:
+
+- `tid`
+- `updated`
+- `total_lmb`
+- `pagu_existing`
+- `sisa_pagu`
+- `ratas_harian`
+- `prediksi_hari`
+- `tanggal_habis`
+- `threshold`
+- `prediksi_at`
+
+### 7.3 Distribusi status yang muncul
+
+Hasil distribusi status dihitung dari `prediksi_hari` secara konsisten lewat:
+
+```python
+status_from_hari(v)
 ```
-Prediksi_ATM1/
-├── backend/
-│   ├── app/
-│   │   ├── main.py                     ← FastAPI app, lifespan, include router
-│   │   ├── scheduler.py                ← APScheduler, 2 job otomatis
-│   │   ├── api/
-│   │   │   └── routes/
-│   │   │       └── predictions.py      ← 3 endpoint: health, predictions, predictions/{tid}
-│   │   └── services/
-│   │       └── prediction_service.py   ← query tabel hasil_prediksi ke JSON
-│   ├── config/
-│   │   ├── config.py                   ← DB config, get_db_engine(), calendar config
-│   │   └── database.py                 ← re-export get_db_engine, get_db_session
-│   ├── models/                         ← file model hasil training (tidak di-commit ke git)
-│   │   ├── model_prediksi_habis.pkl    ← model LightGBM atau RandomForest
-│   │   ├── scaler.pkl                  ← StandardScaler
-│   │   └── fitur.pkl                   ← list nama fitur (urutan harus konsisten)
-│   ├── scripts/
-│   │   ├── calendar_features.py        ← fitur kalender: is_weekend, is_payday, is_holiday
-│   │   ├── data_preprocessing.py       ← ETL + feature engineering → tabel preprocessing
-│   │   ├── train_model.py              ← training LightGBM/RF, evaluasi, simpan model
-│   │   └── predict_realtime.py         ← inferensi data terbaru → tabel hasil_prediksi
-│   ├── tests/
-│   │   └── test_calendar_features.py   ← unit test pytest untuk calendar_features.py
-│   ├── visualizations/                 ← plot feature importance (dihasilkan train_model.py)
-│   ├── .env                            ← konfigurasi environment (jangan di-commit)
-│   ├── .env.example                    ← template .env
-│   └── requirements.txt                ← dependensi Python
-│
-├── frontend/
-│   ├── app/
-│   │   ├── Http/Controllers/
-│   │   │   └── DashboardController.php ← index(), refresh()
-│   │   └── Services/
-│   │       └── ApiService.php          ← getPredictions(), getPredictionByTid()
-│   ├── resources/
-│   │   ├── css/app.css                 ← entry point Tailwind CSS
-│   │   └── views/
-│   │       └── dashboard.blade.php     ← satu-satunya halaman
-│   ├── routes/
-│   │   └── web.php                     ← GET / → DashboardController@index
-│   ├── .env                            ← konfigurasi Laravel (DB=sqlite, dll.)
-│   ├── .env.example
-│   ├── composer.json
-│   └── package.json
-│
-└── docs/
-    └── PROJECT_OVERVIEW.md
-```
 
-**Keterangan folder penting:**
-
-| Folder | Fungsi | File Utama |
-|---|---|---|
-| `backend/app/` | Kode runtime FastAPI | `main.py`, `scheduler.py` |
-| `backend/scripts/` | Pipeline ML (ETL, training, prediksi) | `data_preprocessing.py`, `train_model.py`, `predict_realtime.py` |
-| `backend/config/` | Konfigurasi database dan kalender | `config.py` |
-| `backend/models/` | Artefak model yang disimpan ke disk | `*.pkl` |
-| `backend/tests/` | Unit test | `test_calendar_features.py` |
-| `frontend/app/` | Logika PHP Laravel | `DashboardController.php`, `ApiService.php` |
-| `frontend/resources/views/` | Blade template | `dashboard.blade.php` |
+sehingga semua output punya label yang sama.
 
 ---
 
-## 5. Flow Sistem Secara Keseluruhan
+## 8. Scheduler dan Automation
 
-### Alur Data
+File utama: `backend/app/scheduler.py`
 
+### 8.1 Job 1: realtime prediction
+
+Job ini dijalankan setiap interval menit (default 15 menit):
+
+- preprocessing raw data
+- prediksi realtime
+- upsert hasil ke `hasil_prediksi`
+
+### 8.2 Job 2: retraining
+
+Job ini dijalankan secara berkala (default tiap minggu pada jam 02.00 WIB):
+
+- full preprocessing
+- training ulang model
+- prediksi ulang
+- reset checkpoint
+
+### 8.3 Variabel environment scheduler
+
+Beberapa variabel yang relevan:
+
+- `PREDICT_INTERVAL_MINUTES` → interval prediksi realtime
+- `RETRAIN_DAY_OF_WEEK` → hari retraining
+- `RETRAIN_HOUR` → jam retraining
+- `SOURCE_TABLE` → nama tabel raw source
+- `PREPROCESS_TABLE` → tabel preprocessing
+- `PREDICTION_TABLE` → tabel hasil final
+
+---
+
+## 9. API Backend
+
+File: `backend/app/api/routes/predictions.py`
+
+### Endpoint yang tersedia
+
+- `GET /api/predictions` → membaca seluruh data dari `hasil_prediksi`
+- `GET /api/predictions/{tid}` → membaca data satu TID
+- `GET /health` atau health endpoint → mengecek service hidup
+
+### Format response
+
+Response biasanya berbentuk:
+
+```json
+{
+  "count": 120,
+  "data": [
+    {
+      "tid": "TID001",
+      "updated": "2026-09-09 08:00:00",
+      "prediksi_hari": 2,
+      "tanggal_habis": "11-09-2026",
+      "threshold": "🟠 Waspada"
+    }
+  ],
+  "last_update": "2026-09-09 08:00:00"
+}
 ```
-Tabel data_2026 (MySQL)
-        ↓
-data_preprocessing.py
-  - Load kolom: tid, updated, lmb1-lmb4, pagu_existing
-  - Hitung total_lmb, selisih_lmb (diff per TID per hari)
-  - Agregasi harian per TID
-  - Hitung ratas_harian, sisa_pagu, jumlah_hari (business rule)
-  - Tambahkan rolling features, lag features, cumulative windows
-  - Tambahkan fitur kalender (is_weekend, is_payday, is_holiday, dll.)
-  - Tambahkan interaction features
-        ↓
-Tabel preprocessing (MySQL)
-        ↓
-train_model.py (dijalankan saat pertama kali / tiap Minggu)
-  - Load dari preprocessing
-  - Validasi target business rule
-  - Time-series split 80/20 per TID
-  - StandardScaler → LGBMRegressor (fallback: RandomForestRegressor)
-  - Evaluasi: MAE, R², MAPE
-  - Simpan: model_prediksi_habis.pkl, scaler.pkl, fitur.pkl
-        ↓
-predict_realtime.py (dijalankan tiap 15 menit)
-  - Load data terbaru per TID dari preprocessing
-  - Validasi fitur sesuai fitur.pkl
-  - StandardScaler.transform → model.predict
-  - Hitung tanggal_habis, tentukan threshold
-  - Business rule fallback jika prediksi menyimpang >50%
-        ↓
-Tabel hasil_prediksi (MySQL)
-        ↓
-FastAPI GET /api/predictions
-        ↓
-Laravel ApiService → DashboardController → dashboard.blade.php
+
+---
+
+## 10. Frontend Dashboard
+
+File utama: `frontend/resources/views/dashboard.blade.php`
+
+### 10.1 Fungsi status di dashboard
+
+Dashboard menghitung status dengan prioritas berikut:
+
+1. jika `prediksi_hari` numerik, maka gunakan `status_from_hari` langsung,
+2. jika `prediksi_hari` tidak ada, fallback baca `threshold` string,
+3. summary cards menghitung jumlah per status dari `data`.
+
+### 10.2 Tujuan UI
+
+Dashboard menampilkan:
+
+- total ATM,
+- rata-rata sisa pagu,
+- jumlah kritis, waspada, aman,
+- tabel detail per TID,
+- filter pencarian dan status,
+- rata-rata prediksi hari.
+
+### 10.3 Prinsip konsistensi UI
+
+Untuk menjaga dashboard sama dengan backend, UI tidak boleh memakai aturan status yang berbeda. Logika yang benar adalah:
+
+- ambil `prediksi_hari` sebagai sumber utama,
+- ubah ke status dengan fungsi yang sama seperti backend,
+- hanya jika data tidak ada, baru parse `threshold`.
+
+---
+
+## 11. Perbedaan Model-Only vs Fallback Final
+
+Dalam implementasi saat ini, ada dua kondisi hasil yang mungkin muncul:
+
+### 11.1 Model-only
+
+Output hanya dari model tanpa business-rule fallback.
+
+- prediksi bersifat murni dari ML,
+- status ditentukan dari `prediksi_hari` model,
+- biasanya lebih konsisten dengan pola model dan evaluasi training.
+
+### 11.2 Fallback final
+
+Output akhir yang dipakai untuk scheduler / `hasil_prediksi` saat rule fallback aktif.
+
+- model memprediksi nilai awal,
+- apabila selisih >50% terhadap rule bisnis, nilai diganti,
+- hasil final kemudian disimpan ke DB dan ditampilkan di dashboard.
+
+Dengan kata lain, `hasil_prediksi` bukan selalu model-only; bisa berupa hasil model yang sudah dimodifikasi oleh business rule.
+
+---
+
+## 12. Praktik Konsistensi yang Dipakai Saat Ini
+
+Agar hasil selalu sama di backend, scheduler, dan dashboard, praktik yang disarankan adalah:
+
+- pakai satu fungsi status untuk semua layer,
+- simpan status secara konsisten di `threshold`,
+- manfaatkan `prediksi_hari` sebagai sumber utama di frontend,
+- hindari parsing label string yang berbeda antar layer,
+- simpan snapshot data model-only bila perlu untuk audit evaluasi.
+
+---
+
+## 13. Catatan Implementasi Terkini
+
+Beberapa hal yang sudah diterapkan pada proyek saat ini:
+
+- `status_from_hari()` dijadikan fungsi status tunggal di backend.
+- frontend dashboard memprioritaskan `prediksi_hari` untuk menentukan status.
+- scheduler menjalankan preprocessing + prediksi realtime.
+- laporan evaluasi training baru disimpan bila `SAVE_EVAL_REPORTS` diaktifkan.
+- fallback business rule ditambahkan pada `predict_realtime.py` untuk menjaga hasil sesuai logika operasional.
+
+---
+
+## 14. Kesimpulan
+
+Sistem ini adalah gabungan dari:
+
+- ML model untuk prediksi jumlah hari habis saldo,
+- business rule untuk validasi dan fallback,
+- scheduler otomatis untuk update periodik,
+- API FastAPI sebagai jembatan data,
+- dashboard Laravel untuk eksplorasi dan monitoring.
+
+Kunci utama keberhasilan sistem bukan hanya ketepatan model, tetapi juga konsistensi aturan status dan konsistensi data yang diposting dari backend ke dashboard.
+
+---
+
+## 15. Referensi File Utama
+
+- `backend/scripts/data_preprocessing.py`
+- `backend/scripts/train_model.py`
+- `backend/scripts/predict_realtime.py`
+- `backend/app/scheduler.py`
+- `backend/app/api/routes/predictions.py`
+- `frontend/resources/views/dashboard.blade.php`
+- `frontend/app/Services/ApiService.php`
+
+Dokumen ini dibuat berdasarkan keadaan project yang sedang berjalan, bukan versi awal yang masih generik.
         ↓
 Browser (Dashboard)
 ```
@@ -780,27 +835,25 @@ maka prediksi untuk TID tersebut diganti dengan `business_rule_hari`.
 
 ### Threshold Status
 
-Threshold ditetapkan berdasarkan nilai `prediksi_hari` di `predict_realtime.py`:
+Threshold ditetapkan berdasarkan nilai `prediksi_hari` di `predict_realtime.py` dengan aturan tunggal yang dipakai seluruh layer:
 
 | Nilai `prediksi_hari` | Threshold (label di DB) |
 |---|---|
 | ≤ 1 | `🔴 Kritis` |
-| ≤ 2 | `🟠 Tinggi` |
-| ≤ 3 | `🟡 Sedang` |
+| 2 sampai 3 | `🟠 Waspada` |
 | > 3 | `🟢 Aman` |
 
-Dashboard frontend memetakan label tersebut dengan aturan berikut:
+Dashboard frontend memakai status yang sama dengan aturan berikut:
 
 | Label Backend | Status Frontend | Warna |
 |---|---|---|
-| `Kritis` | Kritis | Merah |
-| `Tinggi` | Waspada | Oranye |
-| `Sedang` | Waspada | Kuning |
-| `Aman` | Aman | Hijau |
+| `🔴 Kritis` | Kritis | Merah |
+| `🟠 Waspada` | Waspada | Oranye |
+| `🟢 Aman` | Aman | Hijau |
 
-Dashboard juga memiliki threshold fallback berbasis `prediksi_hari` langsung (jika field `threshold` kosong):
+Dashboard juga memiliki fallback berbasis `prediksi_hari` langsung (jika field `threshold` tidak tersedia):
 - Kritis: ≤ 1 hari
-- Waspada: ≤ 3 hari
+- Waspada: 2 sampai 3 hari
 - Aman: > 3 hari
 
 ---
@@ -838,7 +891,7 @@ Dipanggil otomatis oleh scheduler setiap `PREDICT_INTERVAL_MINUTES` menit (defau
    - tanggal_habis = updated + prediksi_hari hari
    - Format: DD-MM-YYYY
         ↓
-6. Tetapkan threshold (Kritis/Tinggi/Sedang/Aman)
+6. Tetapkan threshold (`🔴 Kritis` / `🟠 Waspada` / `🟢 Aman`)
         ↓
 7. Business rule fallback
    - Hitung business_rule_hari = ceil(sisa_pagu / ratas_harian)
@@ -846,7 +899,7 @@ Dipanggil otomatis oleh scheduler setiap `PREDICT_INTERVAL_MINUTES` menit (defau
      → ganti prediksi dengan business_rule_hari
    - Hitung ulang threshold setelah fallback
         ↓
-8. Simpan ke tabel hasil_prediksi (if_exists='replace')
+8. Simpan ke tabel hasil_prediksi (UPSERT per TID yang terdampak)
 ```
 
 ### Kolom yang Disimpan ke `hasil_prediksi`
@@ -862,7 +915,7 @@ Dipanggil otomatis oleh scheduler setiap `PREDICT_INTERVAL_MINUTES` menit (defau
 | `selisih_lmb` | INT | Penarikan hari terakhir |
 | `prediksi_hari` | INT | Estimasi jumlah hari sebelum habis |
 | `tanggal_habis` | VARCHAR(20) | Estimasi tanggal habis (DD-MM-YYYY) |
-| `threshold` | VARCHAR(20) | Label status (Kritis/Tinggi/Sedang/Aman) |
+| `threshold` | VARCHAR(20) | Label status (`🔴 Kritis`, `🟠 Waspada`, `🟢 Aman`) |
 | `prediksi_at` | DATETIME | Timestamp saat prediksi dibuat |
 
 ---
@@ -1116,7 +1169,7 @@ Browser (User)
 | `data[].selisih_lmb` | integer/null | Jika ada di tabel | Penarikan hari terakhir |
 | `data[].prediksi_hari` | integer/null | Ya | Estimasi hari sebelum habis |
 | `data[].tanggal_habis` | string/null | Ya | Estimasi tanggal habis (`DD-MM-YYYY`) |
-| `data[].threshold` | string/null | Ya | Label status: `🔴 Kritis`, `🟠 Tinggi`, `🟡 Sedang`, `🟢 Aman` |
+| `data[].threshold` | string/null | Ya | Label status: `🔴 Kritis`, `🟠 Waspada`, `🟢 Aman` |
 | `data[].prediksi_at` | string/null | Ya | Timestamp prediksi dibuat (`YYYY-MM-DD HH:MM:SS`) |
 
 ### `GET /api/predictions/{tid}`
@@ -1282,12 +1335,11 @@ Prioritas resolusi status per baris:
 
 1. Baca field `threshold` dari API (string dari backend)
 2. Jika `threshold` mengandung `"kritis"` → status Kritis (merah)
-3. Jika `threshold` mengandung `"tinggi"` → status Waspada (oranye)
-4. Jika `threshold` mengandung `"sedang"` → status Waspada (kuning)
-5. Jika `threshold` mengandung `"aman"` → status Aman (hijau)
-6. Fallback: gunakan `prediksi_hari` langsung
+3. Jika `threshold` mengandung `"waspada"` → status Waspada (oranye)
+4. Jika `threshold` mengandung `"aman"` → status Aman (hijau)
+5. Fallback: gunakan `prediksi_hari` langsung
    - ≤ 1 → Kritis
-   - ≤ 3 → Waspada
+   - 2 sampai 3 → Waspada
    - > 3 → Aman
 
 ### Summary Cards Dashboard

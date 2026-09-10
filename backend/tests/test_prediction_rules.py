@@ -9,6 +9,7 @@ from scripts.predict_realtime import (
     apply_business_rule_fallback,
     assign_threshold,
     business_rule_days,
+    normalize_prediction_days,
     status_from_hari,
 )
 
@@ -22,7 +23,7 @@ def test_business_rule_days_casts_to_int_before_subtracting_one():
     assert business_rule_days(3952, 1376) == 1
 
 
-def test_apply_business_rule_fallback_forces_rule_on_all_rows():
+def test_apply_business_rule_fallback_keeps_full_model_predictions_when_disabled():
     df = pd.DataFrame([
         {"tid": "A", "updated": "2026-01-01", "sisa_pagu": 50, "ratas_harian": 100, "prediksi_hari": 9},
         {"tid": "B", "updated": "2026-01-02", "sisa_pagu": 250, "ratas_harian": 100, "prediksi_hari": 1},
@@ -30,7 +31,15 @@ def test_apply_business_rule_fallback_forces_rule_on_all_rows():
 
     result = apply_business_rule_fallback(df)
 
-    assert result["prediksi_hari"].tolist() == [0, 1]
+    assert result["prediksi_hari"].tolist() == [9, 1]
+
+
+def test_normalize_prediction_days_reduces_model_output_by_one_before_storage():
+    df = pd.DataFrame({"prediksi_hari": [5, 1, 0]})
+
+    result = normalize_prediction_days(df)
+
+    assert result["prediksi_hari"].tolist() == [4, 0, 0]
 
 
 def test_assign_threshold_uses_three_status_levels():

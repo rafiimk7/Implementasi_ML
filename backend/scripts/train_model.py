@@ -23,6 +23,7 @@ import seaborn as sns
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.preprocessing import StandardScaler
+import os
 
 warnings.filterwarnings("ignore")
 
@@ -366,7 +367,13 @@ def train(df: pd.DataFrame):
         },
     }
 
-    save_rule_based_evaluation_report(eval_report)
+    # Save evaluation reports only when explicitly enabled via environment variable.
+    # This prevents repeated report files being created on every training run.
+    save_reports_flag = os.getenv("SAVE_EVAL_REPORTS", "false").lower() in ("1", "true", "yes")
+    if save_reports_flag:
+        save_rule_based_evaluation_report(eval_report)
+    else:
+        print("[INFO] SAVE_EVAL_REPORTS not enabled — skipping saving rule-based evaluation report.")
 
     trend_report = {
         "model_type": "calendar_trend_model",
@@ -401,7 +408,10 @@ def train(df: pd.DataFrame):
             "gajian": "payday effect on withdrawal intensity and cash depletion",
         },
     }
-    save_calendar_trend_evaluation_report(trend_report)
+    if save_reports_flag:
+        save_calendar_trend_evaluation_report(trend_report)
+    else:
+        print("[INFO] SAVE_EVAL_REPORTS not enabled — skipping saving calendar/trend evaluation report.")
 
     hybrid_report = {
         "model_type": "hybrid_rule_and_trend_model",
@@ -442,7 +452,10 @@ def train(df: pd.DataFrame):
             "combined_logic": "rule and trend are merged in the same feature set for final prediction",
         },
     }
-    save_hybrid_rule_trend_evaluation_report(hybrid_report)
+    if save_reports_flag:
+        save_hybrid_rule_trend_evaluation_report(hybrid_report)
+    else:
+        print("[INFO] SAVE_EVAL_REPORTS not enabled — skipping saving hybrid evaluation report.")
 
     # Feature importance
     feature_importance = pd.DataFrame({
@@ -743,7 +756,6 @@ def save_predictions_to_db(df: pd.DataFrame) -> None:
         "ratas_harian",
         "prediksi_hari",
         "tanggal_habis",
-        "threshold"
     ]
     kolom_ada = [k for k in kolom_simpan if k in df.columns]
     
@@ -756,7 +768,6 @@ def save_predictions_to_db(df: pd.DataFrame) -> None:
     df_save["tid"]           = df_save["tid"].astype(str)
     df_save[DT_COL]          = pd.to_datetime(df_save[DT_COL])
     df_save["tanggal_habis"] = df_save["tanggal_habis"].astype(str)
-    df_save["threshold"]     = df_save["threshold"].astype(str) if "threshold" in df_save.columns else None
     df_save["prediksi_at"]   = pd.to_datetime(df_save["prediksi_at"])
 
     for col in ["total_lmb", "pagu_existing", "sisa_pagu", "ratas_harian", "prediksi_hari"]:
@@ -773,7 +784,6 @@ def save_predictions_to_db(df: pd.DataFrame) -> None:
         "ratas_harian":  Integer(),
         "prediksi_hari": Integer(),
         "tanggal_habis": String(20),
-        "threshold":     String(20),
         "prediksi_at":   DateTime(),
     }
     dtype_map = {k: v for k, v in dtype_map.items() if k in df_save.columns}
