@@ -276,47 +276,13 @@ def assign_threshold(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def apply_business_rule_fallback(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Jika business rule fallback dinyalakan secara eksplisit, ganti prediksi dengan
-    business rule jika menyimpang >50%. Secara default fallback dimatikan agar
-    model penuh tetap dipakai.
-
-    Business rule:
-      sisa_pagu < ratas_harian -> 0 hari (habis hari ini)
-      selainnya                -> int(sisa_pagu / ratas_harian) - 1
-    """
+    """Tetap memakai hasil model sepenuhnya; fungsi ini hanya menjaga API/tes kompatibel."""
     df = df.copy()
 
-    if not BUSINESS_RULE_FALLBACK_ENABLED:
-        print("  ℹ️  Business rule fallback OFF — memakai full model")
-        return assign_threshold(df)
-
-    _raw = (
-        (df["sisa_pagu"] / df["ratas_harian"].replace(0, np.nan))
-        .fillna(0)
-        .astype(float)
-        .astype(int)
-    )
-    df["business_rule_hari"] = np.where(
-        df["sisa_pagu"] < df["ratas_harian"], 0, np.maximum(_raw - 1, 0)
-    )
-
-    if "prediksi_hari" in df.columns:
-        diff        = np.abs(df["prediksi_hari"] - df["business_rule_hari"])
-        denominator = df["business_rule_hari"].replace(0, 1)
-        diff_pct    = (diff / denominator) * 100
-        use_rule    = diff_pct > 50
-
-        if use_rule.any():
-            print(f"  ⚠️  {use_rule.sum()} TID menggunakan business rule fallback")
-            df.loc[use_rule, "prediksi_hari"] = df.loc[use_rule, "business_rule_hari"]
-            df.loc[use_rule, "tanggal_habis"] = (
-                pd.to_datetime(df.loc[use_rule, DT_COL]) +
-                pd.to_timedelta(df.loc[use_rule, "business_rule_hari"], unit="D")
-            ).dt.strftime("%d-%m-%Y")
-
-    df = assign_threshold(df)
-    return df
+    # Sebagai aturan bisnis saat ini, model adalah sumber prediksi utama.
+    # Tidak ada override ke business rule lagi.
+    print("  ℹ️  Business rule fallback OFF — memakai hasil model saja")
+    return assign_threshold(df)
 
 
 def predict(df: pd.DataFrame, model, scaler, fitur: list) -> pd.DataFrame:
@@ -528,9 +494,7 @@ def main():
         # 6. Prediksi
         df_hasil = predict(df_ready, model, scaler, fitur)
 
-        # 7. Business rule fallback
-        df_hasil = apply_business_rule_fallback(df_hasil)
-        df_hasil = normalize_prediction_days(df_hasil)
+        
 
         # 8. UPSERT hanya TID terdampak
         save_predictions(df_hasil)

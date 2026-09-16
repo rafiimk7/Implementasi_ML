@@ -189,7 +189,7 @@ def preprocess(df: pd.DataFrame) -> pd.DataFrame:
               pagu_existing=("pagu_existing", "last"),
               selisih_lmb=("selisih_lmb", "sum"),  # Total withdrawal per hari
           )
-    )
+    ) 
 
     # ----------------------------------------------------------
     # HITUNG RATA-RATA HARIAN PER TID

@@ -2,12 +2,47 @@
 """
 Training Model ML — Prediksi Tanggal Habis ATM
 ------------------------------------------------
-Membaca data dari tabel `preprocessing` di MySQL,
-melatih model LightGBM (fallback: RandomForest),
-menyimpan artefak model ke disk, dan hasil prediksi ke `hasil_prediksi`.
+
+Pipeline:
+1. Membaca data dari tabel `preprocessing`
+2. Validasi target `jumlah_hari`
+3. Cleaning missing value
+4. Handling outlier
+5. Time-series split per TID
+6. Training LightGBM
+   - fallback RandomForest
+7. Evaluasi:
+   - MAE
+   - RMSE
+   - R²
+   - Median Absolute Error
+   - MAPE
+   - Error tolerance <= 1, 2, 3 hari
+8. Perbandingan dengan Business Rule Baseline
+9. Feature importance
+10. Prediksi data terbaru setiap TID
+11. Simpan hasil ke `hasil_prediksi`
+12. Simpan model, scaler/feature metadata, dan evaluation report
+
+CATATAN:
+Model ini merupakan REGRESSION MODEL.
+
+Target:
+    jumlah_hari
+
+Business Rule Baseline:
+    jika sisa_pagu < ratas_harian:
+        jumlah_hari = 0
+    else:
+        jumlah_hari = floor(sisa_pagu / ratas_harian) - 1
+
+PENTING:
+Target tidak otomatis diganti oleh business rule.
+Business rule hanya digunakan sebagai BASELINE pembanding.
 """
 
 import json
+import os
 import sys
 import warnings
 from datetime import datetime
@@ -15,64 +50,96 @@ from pathlib import Path
 
 import joblib
 import matplotlib
+
 matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import seaborn as sns
+
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_absolute_error, r2_score
+from sklearn.metrics import (
+    mean_absolute_error,
+    mean_squared_error,
+    median_absolute_error,
+    r2_score,
+)
 from sklearn.preprocessing import StandardScaler
-import os
 
 warnings.filterwarnings("ignore")
 
-# ----------------------------------------------------------
+
+# ==========================================================
 # PATH & KONFIGURASI
-# ----------------------------------------------------------
+# ==========================================================
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-MODELS_DIR   = PROJECT_ROOT / "models"
+
+MODELS_DIR = PROJECT_ROOT / "models"
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
+
 VISUALIZATION_DIR = PROJECT_ROOT / "visualizations"
 VISUALIZATION_DIR.mkdir(parents=True, exist_ok=True)
+
 REPORTS_DIR = VISUALIZATION_DIR / "reports"
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 sys.path.insert(0, str(PROJECT_ROOT))
+
+
+# ==========================================================
+# IMPORT PROJECT
+# ==========================================================
+
 from config.config import get_db_engine
 from scripts.predict_realtime import status_from_hari
 
+
+# ==========================================================
+# DATABASE CONFIG
+# ==========================================================
+
 PREPROCESS_TABLE = "preprocessing"
 PREDICTION_TABLE = "hasil_prediksi"
-DT_COL           = "updated"
 
-# Fitur yang dihasilkan oleh data_preprocessing.py (48 fitur)
+DT_COL = "updated"
+TARGET = "jumlah_hari"
+
+
+# ==========================================================
+# FITUR MODEL
+# ==========================================================
+
 FITUR_ML = [
-    # Balance & usage
+    # Balance & Usage
     "sisa_pagu",
     "ratas_harian",
     "selisih_lmb",
-    # Kalender dasar
+
+    # Kalender Dasar
     "hari",
     "bulan",
     "tahun",
     "hari_ke",
     "kuartal",
-    # Cyclic encoding
+
+    # Cyclic Encoding
     "hari_sin",
     "hari_cos",
     "bulan_sin",
     "bulan_cos",
     "hari_ke_sin",
     "hari_ke_cos",
-    # Kalender cerdas (flag + jarak ke event)
+
+    # Kalender Cerdas
     "is_weekend",
     "is_payday",
     "is_holiday",
     "days_to_payday",
     "days_since_payday",
     "is_near_holiday_3d",
-    # Trend historis
+
+    # Trend Historis
     "rolling_7d",
     "rolling_14d",
     "rolling_30d",
@@ -81,14 +148,16 @@ FITUR_ML = [
     "rolling_7d_ratio",
     "trend_7d_ratio",
     "trend_14d_ratio",
-    # Interaction: kalender × transaksi
+
+    # Interaction Features
     "weekend_x_ratas_harian",
     "payday_x_sisa_pagu",
     "holiday_x_ratas_harian",
     "weekend_x_trend",
     "payday_x_trend",
     "holiday_x_trend",
-    # Lag & weekday Fourier
+
+    # Lag & Weekday
     "lag_1_ratas",
     "lag_7_ratas",
     "lag_14_ratas",
@@ -97,19 +166,49 @@ FITUR_ML = [
     "weekday_cos",
     "payday_x_weekday_sin",
     "weekend_x_rolling_std_7d",
-    # Event / window
+
+    # Event / Window
     "cum_prev_3d",
     "cum_prev_7d",
     "cum_prev_14d",
     "holiday_count_next_7",
     "payday_cluster_flag",
-        "event_uplift",
+    "event_uplift",
 ]
-TARGET = "jumlah_hari"
 
 
 # ==========================================================
-# 1. LOAD DATA DARI TABEL PREPROCESSING
+# MODEL CONFIGURATION
+# ==========================================================
+
+LIGHTGBM_CONFIG = {
+    "objective": "regression",
+    "n_estimators": 500,
+    "learning_rate": 0.05,
+    "max_depth": 8,
+    "num_leaves": 31,
+    "min_child_samples": 20,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "random_state": 42,
+    "n_jobs": -1,
+    "verbosity": -1,
+}
+
+
+RANDOM_FOREST_CONFIG = {
+    "n_estimators": 300,
+    "max_depth": 10,
+    "min_samples_split": 10,
+    "min_samples_leaf": 5,
+    "max_features": "sqrt",
+    "random_state": 42,
+    "n_jobs": -1,
+}
+
+
+# ==========================================================
+# 1. LOAD DATA
 # ==========================================================
 
 def load_preprocessing() -> pd.DataFrame:
@@ -118,740 +217,727 @@ def load_preprocessing() -> pd.DataFrame:
     print("=" * 70)
 
     engine = get_db_engine()
-    df = pd.read_sql(f"SELECT * FROM {PREPROCESS_TABLE}", con=engine)
-    print(f"Data berhasil dimuat : {len(df)} baris, {len(df.columns)} kolom")
-    
-    # Validasi kolom wajib
+
+    query = f"""
+        SELECT *
+        FROM {PREPROCESS_TABLE}
+    """
+
+    df = pd.read_sql(query, con=engine)
+
+    print(f"Data berhasil dimuat : {len(df):,} baris")
+    print(f"Jumlah kolom         : {len(df.columns)}")
+
+    # Validasi kolom
     kolom_wajib = FITUR_ML + [TARGET, "tid", DT_COL]
-    kolom_kurang = [k for k in kolom_wajib if k not in df.columns]
+
+    kolom_kurang = [
+        kolom for kolom in kolom_wajib
+        if kolom not in df.columns
+    ]
+
     if kolom_kurang:
-        raise ValueError(f"Kolom wajib tidak ditemukan: {kolom_kurang}")
-    
-    # CAST tipe data
-    df[DT_COL] = pd.to_datetime(df[DT_COL])
+        raise ValueError(
+            "Kolom wajib tidak ditemukan:\n"
+            + "\n".join(f"- {kolom}" for kolom in kolom_kurang)
+        )
+
+    # Datetime
+    df[DT_COL] = pd.to_datetime(df[DT_COL], errors="coerce")
+
+    # Buang datetime invalid
+    invalid_datetime = df[DT_COL].isna().sum()
+
+    if invalid_datetime > 0:
+        print(
+            f"[WARNING] {invalid_datetime} record memiliki "
+            f"datetime invalid dan akan dihapus."
+        )
+        df = df.dropna(subset=[DT_COL])
+
+    # Tanggal
     df["tanggal"] = df[DT_COL].dt.date
-    
+
     return df
 
 
 # ==========================================================
-# 2. VALIDASI TARGET DENGAN BUSINESS RULE
+# 2. VALIDASI TARGET
 # ==========================================================
 
 def validate_target(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Memastikan target 'jumlah_hari' sesuai dengan business rule:
-    ceil(sisa_pagu / ratas_harian)
-    """
     print("\n" + "=" * 70)
-    print("VALIDASI TARGET DENGAN BUSINESS RULE")
+    print("VALIDASI TARGET")
     print("=" * 70)
-    
-    # Hitung ulang target berdasarkan business rule.
-    # Jika sisa_pagu < ratas_harian → ATM habis hari ini (0 hari).
-    # Jika sisa_pagu >= ratas_harian → int(sisa_pagu / ratas_harian) - 1.
-    _raw = (
-        (df["sisa_pagu"] /
-         df["ratas_harian"].replace(0, np.nan))
-        .fillna(0)
-        .astype(float)
-        .astype(int)
-    )
-    df["jumlah_hari_check"] = np.where(
+
+    # Business Rule
+    ratio = df["sisa_pagu"] / df["ratas_harian"].replace(0, np.nan)
+
+    jumlah_hari_check = np.where(
         df["sisa_pagu"] < df["ratas_harian"],
         0,
-        np.maximum(_raw - 1, 0),
+        np.maximum(np.floor(ratio.fillna(0)) - 1, 0)
     )
-    
-    # Cek konsistensi
-    konsisten = (df["jumlah_hari"] == df["jumlah_hari_check"])
-    konsisten_pct = konsisten.mean() * 100
-    
-    print(f"Konsistensi target dengan business rule: {konsisten_pct:.2f}%")
-    
+
+    jumlah_hari_check = pd.Series(
+        jumlah_hari_check,
+        index=df.index
+    ).astype(float)
+
+    # Target asli
+    target_numeric = pd.to_numeric(df[TARGET], errors="coerce")
+
+    valid_target = target_numeric.notna()
+
+    df[TARGET] = target_numeric
+
+    # Konsistensi
+    konsisten = (
+        df.loc[valid_target, TARGET]
+        ==
+        jumlah_hari_check.loc[valid_target]
+    )
+
+    if len(konsisten) > 0:
+        konsisten_pct = konsisten.mean() * 100
+    else:
+        konsisten_pct = 0
+
+    print(f"Target valid        : {valid_target.sum():,}")
+    print(f"Target invalid      : {(~valid_target).sum():,}")
+    print(f"Konsistensi dengan business rule : {konsisten_pct:.2f}%")
+
     if konsisten_pct < 95:
-        print("⚠️ WARNING: Sebagian besar target tidak konsisten!")
-        print("   Kemungkinan ada perubahan data setelah preprocessing.")
-        print("   Menggunakan hasil perhitungan ulang untuk training.")
-        df[TARGET] = df["jumlah_hari_check"]
-    
-    # Drop kolom temporary
-    df = df.drop(columns=["jumlah_hari_check"])
-    
+        print("\n[INFO] Target berbeda dengan business rule.")
+        print("[INFO] Target ASLI tetap digunakan untuk training.")
+    else:
+        print("\n[INFO] Sebagian besar target konsisten dengan business rule.")
+
     return df
 
 
 # ==========================================================
-# 3. TRAINING MODEL
+# 3. CLEANING DATA
 # ==========================================================
 
-def train(df: pd.DataFrame):
+def clean_training_data(df: pd.DataFrame) -> pd.DataFrame:
     print("\n" + "=" * 70)
-    print("TRAINING MODEL")
+    print("CLEANING DATA TRAINING")
     print("=" * 70)
 
-    # Pastikan semua fitur tersedia
-    fitur_kurang = [f for f in FITUR_ML if f not in df.columns]
-    if fitur_kurang:
-        raise ValueError(
-            f"Kolom fitur berikut tidak ditemukan: {fitur_kurang}\n"
-            "Jalankan data_preprocessing.py terlebih dahulu."
-        )
+    df_ml = df.copy()
 
-    # ==========================================================
-    # HANDLE MISSING VALUES & OUTLIERS
-    # ==========================================================
-    
-    # 1. Filter target valid
-    df_ml = df[df[TARGET] > 0].copy()
+    # Target valid
+    df_ml = df_ml[df_ml[TARGET].notna()].copy()
 
-    # 2. Add interaction features before training if not already present
-    if "weekend_x_ratas_harian" not in df_ml.columns:
-        df_ml["weekend_x_ratas_harian"] = df_ml["is_weekend"] * df_ml["ratas_harian"]
-    if "payday_x_sisa_pagu" not in df_ml.columns:
-        df_ml["payday_x_sisa_pagu"] = df_ml["is_payday"] * df_ml["sisa_pagu"]
-    if "holiday_x_ratas_harian" not in df_ml.columns:
-        df_ml["holiday_x_ratas_harian"] = df_ml["is_holiday"] * df_ml["ratas_harian"]
-    if "weekend_x_trend" not in df_ml.columns:
-        df_ml["weekend_x_trend"] = df_ml["is_weekend"] * df_ml["trend_7d_ratio"]
-    if "payday_x_trend" not in df_ml.columns:
-        df_ml["payday_x_trend"] = df_ml["is_payday"] * df_ml["trend_7d_ratio"]
-    if "holiday_x_trend" not in df_ml.columns:
-        df_ml["holiday_x_trend"] = df_ml["is_holiday"] * df_ml["trend_7d_ratio"]
+    # Rata-rata harian valid
+    df_ml = df_ml[
+        df_ml["ratas_harian"].notna()
+        & (df_ml["ratas_harian"] > 0)
+    ].copy()
 
-    # 3. Handle missing values - imputasi dengan median
+    # Target >= 0
+    df_ml = df_ml[df_ml[TARGET] >= 0].copy()
+
+    # Sort
+    df_ml = (
+        df_ml
+        .sort_values(["tid", DT_COL])
+        .reset_index(drop=True)
+    )
+
+    # Missing value
+    print("\nMissing value:")
+    total_missing = 0
+
     for col in FITUR_ML:
-        median_val = df_ml[col].median()
-        df_ml[col] = df_ml[col].fillna(median_val)
-    
-    # 3. Handle outliers - winsorization (clip ke percentile 1% dan 99%)
+        missing_before = df_ml[col].isna().sum()
+        total_missing += missing_before
+
+        if df_ml[col].isna().all():
+            df_ml[col] = 0
+        else:
+            median_value = df_ml[col].median()
+            df_ml[col] = df_ml[col].fillna(median_value)
+
+    print(f"Total missing feature yang ditangani: {total_missing:,}")
+
+    # Outlier
+    print("\nWinsorization:")
+
     for col in ["selisih_lmb", "ratas_harian"]:
+        if col not in df_ml.columns:
+            continue
+
         lower = df_ml[col].quantile(0.01)
         upper = df_ml[col].quantile(0.99)
-        df_ml[col] = df_ml[col].clip(lower, upper)
-    
-    print(f"Jumlah data training setelah cleaning : {len(df_ml)} record")
-    print(f"Jumlah fitur                          : {len(FITUR_ML)}")
 
-    if len(df_ml) < 10:
-        raise ValueError(
-            f"Data terlalu sedikit ({len(df_ml)} record). "
-            "Pastikan tabel preprocessing sudah terisi."
-        )
+        df_ml[col] = df_ml[col].clip(lower=lower, upper=upper)
 
-    X = df_ml[FITUR_ML]
-    y = df_ml[TARGET]
+        print(f"{col}: {lower:.2f} - {upper:.2f}")
 
-    # ==========================================================
-    # SPLIT DATA PER TID BERDASARKAN WAKTU (TIME-SERIES SPLIT)
-    # ==========================================================
-    # Data ATM bersifat temporal, sehingga split acak tidak ideal.
-    # Kita urutkan tiap terminal berdasarkan updated dan ambil 80% awal
-    # untuk train serta 20% terakhir untuk test, menjaga urutan waktu.
-    df_ml = df_ml.sort_values(["tid", DT_COL]).reset_index(drop=True)
+    print(f"\nJumlah data setelah cleaning : {len(df_ml):,}")
+    print(f"Jumlah TID                  : {df_ml['tid'].nunique():,}")
+
+    if len(df_ml) < 20:
+        raise ValueError("Data terlalu sedikit untuk training.")
+
+    return df_ml
+
+
+# ==========================================================
+# 4. TIME SERIES SPLIT PER TID
+# ==========================================================
+
+def time_series_split(df: pd.DataFrame):
+    print("\n" + "=" * 70)
+    print("TIME-SERIES SPLIT PER TID")
+    print("=" * 70)
 
     train_frames = []
     test_frames = []
+    skipped_tid = []
 
-    for tid, group in df_ml.groupby("tid", sort=False):
+    for tid, group in df.groupby("tid", sort=False):
         group = group.sort_values(DT_COL).copy()
-        if len(group) < 2:
-            train_frames.append(group)
+
+        # Minimal 5 record
+        if len(group) < 5:
+            skipped_tid.append((tid, len(group)))
             continue
 
-        cutoff = max(1, int(len(group) * 0.8))
-        train_frames.append(group.iloc[:cutoff])
-        if len(group) > cutoff:
-            test_frames.append(group.iloc[cutoff:])
+        cutoff = int(len(group) * 0.80)
+        cutoff = max(cutoff, 1)
+
+        train_part = group.iloc[:cutoff].copy()
+        test_part = group.iloc[cutoff:].copy()
+
+        if len(test_part) == 0:
+            continue
+
+        train_frames.append(train_part)
+        test_frames.append(test_part)
+
+    if not train_frames:
+        raise ValueError("Tidak ada data training.")
 
     if not test_frames:
-        raise ValueError(
-            "Tidak cukup data per TID untuk melakukan time-series split. "
-            "Pastikan tiap terminal memiliki minimal 2 record waktu yang cukup."
-        )
+        raise ValueError("Tidak ada data testing.")
 
     train_df = pd.concat(train_frames, ignore_index=True)
     test_df = pd.concat(test_frames, ignore_index=True)
 
-    X_train = train_df[FITUR_ML]
-    y_train = train_df[TARGET]
-    X_test = test_df[FITUR_ML]
-    y_test = test_df[TARGET]
+    print(f"Train rows : {len(train_df):,}")
+    print(f"Test rows  : {len(test_df):,}")
+    print(f"Train TID  : {train_df['tid'].nunique():,}")
+    print(f"Test TID   : {test_df['tid'].nunique():,}")
+    print(
+        f"Train ratio: "
+        f"{len(train_df) / (len(train_df) + len(test_df)) * 100:.2f}%"
+    )
+    print(
+        f"Test ratio : "
+        f"{len(test_df) / (len(train_df) + len(test_df)) * 100:.2f}%"
+    )
 
-    # ==========================================================
-    # SCALING
-    # ==========================================================
+    if skipped_tid:
+        print("\n[INFO] TID yang dilewati karena data < 5:")
+        for tid, count in skipped_tid[:10]:
+            print(f"  TID {tid}: {count} record")
+        if len(skipped_tid) > 10:
+            print(f"  ... dan {len(skipped_tid) - 10} TID lainnya.")
+
+    return train_df, test_df
+
+
+# ==========================================================
+# 5. TRAIN MODEL
+# ==========================================================
+
+def train_model(X_train, y_train, sample_weights=None):
+    print("\n" + "=" * 70)
+    print("TRAINING MODEL")
+    print("=" * 70)
+
     scaler = StandardScaler()
     X_train_scaled = scaler.fit_transform(X_train)
-    X_test_scaled  = scaler.transform(X_test)
 
-    # ==========================================================
-    # TRAINING
-    # ==========================================================
-    # Prepare sample weights (emphasize event windows)
-    if "sample_weight_event" in df_ml.columns:
-        sample_weights = df_ml.loc[X_train.index, "sample_weight_event"].values
-    else:
-        sample_weights = None
-
-    # Try LightGBM first (supports sample_weight), fallback to RandomForest
+    # LIGHTGBM
     try:
         import lightgbm as lgb
-        print("Menggunakan LightGBM untuk training (dengan sample weights jika tersedia)")
-        model = lgb.LGBMRegressor(
-            n_estimators=500,
-            max_depth=8,
-            learning_rate=0.05,
-            random_state=42,
-            n_jobs=-1,
-        )
-        model.fit(X_train_scaled, y_train, sample_weight=sample_weights)
-        # feature importances from LGBM
-        importances = model.feature_importances_
-    except Exception:
-        print("LightGBM tidak tersedia atau gagal, fallback ke RandomForest (sample_weight akan dipakai jika tersedia)")
-        model = RandomForestRegressor(
-            n_estimators=200,
-            max_depth=8,
-            min_samples_split=10,
-            min_samples_leaf=5,
-            random_state=42,
-            n_jobs=-1,
-        )
+
+        print("\n[MODEL] LightGBM Regressor")
+        print("Parameter:")
+        for key, value in LIGHTGBM_CONFIG.items():
+            print(f"  {key}: {value}")
+
+        model = lgb.LGBMRegressor(**LIGHTGBM_CONFIG)
+
         if sample_weights is not None:
             model.fit(X_train_scaled, y_train, sample_weight=sample_weights)
         else:
             model.fit(X_train_scaled, y_train)
-        importances = model.feature_importances_
 
-    # ==========================================================
-    # EVALUASI
-    # ==========================================================
+        return model, scaler, "LightGBM"
+
+    except Exception as e:
+        print(f"\n[WARNING] LightGBM gagal: {e}")
+        print("\n[MODEL] RandomForestRegressor")
+        print("Parameter:")
+        for key, value in RANDOM_FOREST_CONFIG.items():
+            print(f"  {key}: {value}")
+
+        model = RandomForestRegressor(**RANDOM_FOREST_CONFIG)
+
+        if sample_weights is not None:
+            model.fit(X_train_scaled, y_train, sample_weight=sample_weights)
+        else:
+            model.fit(X_train_scaled, y_train)
+
+        return model, scaler, "RandomForest"
+
+
+# ==========================================================
+# 6. BUSINESS RULE BASELINE
+# ==========================================================
+
+def calculate_business_rule(df: pd.DataFrame):
+    ratio = df["sisa_pagu"] / df["ratas_harian"].replace(0, np.nan)
+
+    baseline = np.where(
+        df["sisa_pagu"] < df["ratas_harian"],
+        0,
+        np.maximum(np.floor(ratio.fillna(0)) - 1, 0)
+    )
+
+    return np.asarray(baseline, dtype=float)
+
+
+# ==========================================================
+# 7. CALCULATE REGRESSION METRICS
+# ==========================================================
+
+def calculate_metrics(y_true, y_pred):
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+
+    # MAE
+    mae = mean_absolute_error(y_true, y_pred)
+
+    # RMSE
+    rmse = np.sqrt(mean_squared_error(y_true, y_pred))
+
+    # R2
+    if len(y_true) > 1:
+        r2 = r2_score(y_true, y_pred)
+    else:
+        r2 = np.nan
+
+    # Median Absolute Error
+    median_ae = median_absolute_error(y_true, y_pred)
+
+    # MAPE
+    mask = y_true != 0
+    if mask.sum() > 0:
+        mape = (
+            np.mean(
+                np.abs(
+                    (y_true[mask] - y_pred[mask]) / y_true[mask]
+                )
+            )
+            * 100
+        )
+    else:
+        mape = np.nan
+
+    # Error
+    abs_error = np.abs(y_true - y_pred)
+
+    within_1_day = (abs_error <= 1).mean() * 100
+    within_2_days = (abs_error <= 2).mean() * 100
+    within_3_days = (abs_error <= 3).mean() * 100
+
+    return {
+        "mae_days": float(mae),
+        "rmse_days": float(rmse),
+        "r2": float(r2),
+        "median_absolute_error_days": float(median_ae),
+        "mape_percent": float(mape),
+        "within_1_day_percent": float(within_1_day),
+        "within_2_days_percent": float(within_2_days),
+        "within_3_days_percent": float(within_3_days),
+    }
+
+
+# ==========================================================
+# 8. EVALUATION
+# ==========================================================
+
+def evaluate_model(model, scaler, model_name, train_df, test_df):
+    print("\n" + "=" * 70)
+    print("EVALUASI MODEL")
+    print("=" * 70)
+
+    X_train = train_df[FITUR_ML].copy()
+    y_train = train_df[TARGET].astype(float)
+
+    X_test = test_df[FITUR_ML].copy()
+    y_test = test_df[TARGET].astype(float)
+
+    # Prediction
+    X_test_scaled = scaler.transform(X_test)
     y_pred = model.predict(X_test_scaled)
-    mae = mean_absolute_error(y_test, y_pred)
-    r2  = r2_score(y_test, y_pred)
-    
-    # MAPE (Mean Absolute Percentage Error)
-    mape = np.mean(np.abs((y_test - y_pred) / y_test)) * 100
 
-    print(f"\nHASIL EVALUASI:")
-    print(f"  MAE  : {mae:.2f} hari")
-    print(f"  R²   : {r2:.4f}")
-    print(f"  MAPE : {mape:.2f}%")
-    
-    threshold_distribution = (
-        pd.Series(y_pred, name='prediksi_hari')
-        .apply(lambda v: status_from_hari(v))
+    # Hari tidak boleh negatif
+    y_pred = np.maximum(y_pred, 0)
+
+    # ML Metrics
+    ml_metrics = calculate_metrics(y_test, y_pred)
+
+    # Baseline
+    baseline_pred = calculate_business_rule(test_df)
+    baseline_metrics = calculate_metrics(y_test, baseline_pred)
+
+    # Print
+    print(f"\nModel: {model_name}")
+
+    print("\n" + "-" * 50)
+    print("METRIK MODEL ML")
+    print("-" * 50)
+
+    print(f"MAE       : {ml_metrics['mae_days']:.4f} hari")
+    print(f"RMSE      : {ml_metrics['rmse_days']:.4f} hari")
+    print(f"R²        : {ml_metrics['r2']:.4f}")
+    print(
+        f"Median AE : "
+        f"{ml_metrics['median_absolute_error_days']:.4f} hari"
+    )
+    print(f"MAPE      : {ml_metrics['mape_percent']:.2f}%")
+    print(
+        f"Error <=1 hari : "
+        f"{ml_metrics['within_1_day_percent']:.2f}%"
+    )
+    print(
+        f"Error <=2 hari : "
+        f"{ml_metrics['within_2_days_percent']:.2f}%"
+    )
+    print(
+        f"Error <=3 hari : "
+        f"{ml_metrics['within_3_days_percent']:.2f}%"
+    )
+
+    print("\n" + "-" * 50)
+    print("BUSINESS RULE BASELINE")
+    print("-" * 50)
+
+    print(f"MAE       : {baseline_metrics['mae_days']:.4f} hari")
+    print(f"RMSE      : {baseline_metrics['rmse_days']:.4f} hari")
+    print(f"R²        : {baseline_metrics['r2']:.4f}")
+
+    # Improvement
+    if baseline_metrics["mae_days"] > 0:
+        mae_improvement = (
+            (baseline_metrics["mae_days"] - ml_metrics["mae_days"])
+            / baseline_metrics["mae_days"]
+            * 100
+        )
+    else:
+        mae_improvement = 0
+
+    print("\n" + "-" * 50)
+    print("PERBANDINGAN MAE")
+    print("-" * 50)
+
+    print(f"Baseline MAE : {baseline_metrics['mae_days']:.4f}")
+    print(f"ML MAE       : {ml_metrics['mae_days']:.4f}")
+    print(f"Perubahan    : {mae_improvement:.2f}%")
+
+    # Status distribution
+    status_distribution = (
+        pd.Series(y_pred)
+        .apply(lambda x: status_from_hari(x))
         .value_counts()
         .to_dict()
     )
 
-    eval_report = {
-        "model_type": "rule_based_baseline",
-        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "dataset": {
-            "train_rows": int(len(train_df)),
-            "test_rows": int(len(test_df)),
-            "tid_count": int(test_df["tid"].nunique()) if "tid" in test_df.columns else 0,
-        },
-        "metrics": {
-            "mae_days": float(mae),
-            "r2_score": float(r2),
-            "mape_percent": float(mape),
-        },
-        "status_distribution": threshold_distribution,
-        "rule_definition": {
-            "kritis": "<= 1 hari",
-            "waspada": "2 sampai 3 hari",
-            "aman": "> 3 hari",
-        },
+    return {
+        "model_metrics": ml_metrics,
+        "baseline_metrics": baseline_metrics,
+        "mae_improvement_percent": float(mae_improvement),
+        "status_distribution": status_distribution,
+        "y_test": y_test,
+        "y_pred": y_pred,
+        "baseline_pred": baseline_pred,
     }
 
-    # Save evaluation reports only when explicitly enabled via environment variable.
-    # This prevents repeated report files being created on every training run.
-    save_reports_flag = os.getenv("SAVE_EVAL_REPORTS", "false").lower() in ("1", "true", "yes")
-    if save_reports_flag:
-        save_rule_based_evaluation_report(eval_report)
-    else:
-        print("[INFO] SAVE_EVAL_REPORTS not enabled — skipping saving rule-based evaluation report.")
 
-    trend_report = {
-        "model_type": "calendar_trend_model",
-        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "dataset": {
-            "train_rows": int(len(train_df)),
-            "test_rows": int(len(test_df)),
-            "tid_count": int(test_df["tid"].nunique()) if "tid" in test_df.columns else 0,
-        },
-        "metrics": {
-            "mae_days": float(mae),
-            "r2_score": float(r2),
-            "mape_percent": float(mape),
-        },
-        "status_distribution": threshold_distribution,
-        "focus_features": [
-            "is_weekend",
-            "is_payday",
-            "is_holiday",
-            "days_to_payday",
-            "days_since_payday",
-            "is_near_holiday_3d",
-            "trend_7d_ratio",
-            "rolling_7d_ratio",
-            "weekend_x_trend",
-            "payday_x_trend",
-            "holiday_x_trend",
-        ],
-        "event_pattern_summary": {
-            "weekend": "weekend effect on demand and withdrawal pattern",
-            "tanggal_merah": "holiday impact on ATM usage and liquidity pressure",
-            "gajian": "payday effect on withdrawal intensity and cash depletion",
-        },
-    }
-    if save_reports_flag:
-        save_calendar_trend_evaluation_report(trend_report)
-    else:
-        print("[INFO] SAVE_EVAL_REPORTS not enabled — skipping saving calendar/trend evaluation report.")
+# ==========================================================
+# 9. FEATURE IMPORTANCE
+# ==========================================================
 
-    hybrid_report = {
-        "model_type": "hybrid_rule_and_trend_model",
-        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "dataset": {
-            "train_rows": int(len(train_df)),
-            "test_rows": int(len(test_df)),
-            "tid_count": int(test_df["tid"].nunique()) if "tid" in test_df.columns else 0,
-        },
-        "metrics": {
-            "mae_days": float(mae),
-            "r2_score": float(r2),
-            "mape_percent": float(mape),
-        },
-        "status_distribution": threshold_distribution,
-        "rule_definition": {
-            "kritis": "<= 1 hari",
-            "waspada": "2 sampai 3 hari",
-            "aman": "> 3 hari",
-        },
-        "focus_features": [
-            "sisa_pagu",
-            "ratas_harian",
-            "trend_7d_ratio",
-            "rolling_7d_ratio",
-            "is_weekend",
-            "is_payday",
-            "is_holiday",
-            "days_to_payday",
-            "days_since_payday",
-            "weekend_x_trend",
-            "payday_x_trend",
-            "holiday_x_trend",
-        ],
-        "hybrid_summary": {
-            "rule_based_signal": "status based on remaining balance and daily withdrawal rate",
-            "trend_signal": "calendar and trend behavior from weekend, holiday, and payday effects",
-            "combined_logic": "rule and trend are merged in the same feature set for final prediction",
-        },
-    }
-    if save_reports_flag:
-        save_hybrid_rule_trend_evaluation_report(hybrid_report)
-    else:
-        print("[INFO] SAVE_EVAL_REPORTS not enabled — skipping saving hybrid evaluation report.")
+def save_feature_importance(model, model_name):
+    if not hasattr(model, "feature_importances_"):
+        print(
+            "[WARNING] Model tidak menyediakan feature importance."
+        )
+        return None
 
-    # Feature importance
     feature_importance = pd.DataFrame({
-        'feature': FITUR_ML,
-        'importance': importances
-    }).sort_values('importance', ascending=False)
+        "feature": FITUR_ML,
+        "importance": model.feature_importances_
+    })
 
-    def categorize_feature(feature_name: str) -> str:
-        name = feature_name.lower()
-        if any(k in name for k in ["sisa_pagu", "ratas_harian", "selisih_lmb", "total_lmb", "pagu_existing"]):
-            return "Balance & usage"
-        if any(k in name for k in ["is_weekend", "is_payday", "is_holiday", "days_to_payday", "days_since_payday", "holiday_count_next_7", "payday_cluster_flag", "near_holiday"]):
-            return "Calendar & event"
-        if any(k in name for k in ["rolling_", "trend_", "cum_prev_", "event_uplift"]):
-            return "Trend & history"
-        if any(k in name for k in ["lag_", "weekday", "hari_", "bulan_", "kuartal", "tahun"]):
-            return "Temporal & lag"
-        if any(k in name for k in ["weekend_x_", "payday_x_", "holiday_x_", "sample_weight_event"]):
-            return "Interaction features"
-        return "Other"
-
-    feature_importance["group"] = feature_importance["feature"].apply(categorize_feature)
-
-    top20 = feature_importance.head(20).sort_values("importance", ascending=True)
-    fig, ax = plt.subplots(figsize=(10, 8))
-    ax.barh(top20["feature"], top20["importance"], color=sns.color_palette("viridis", len(top20)))
-    ax.invert_yaxis()
-    ax.set_title("Feature Importance — Top 20")
-    ax.set_xlabel("Importance")
-    ax.set_ylabel("Feature")
-    fig.tight_layout()
-    fig.savefig(VISUALIZATION_DIR / "06_feature_importance_top20.png", dpi=200)
-    plt.close(fig)
-
-    group_summary = (
-        feature_importance.groupby("group", as_index=False)["importance"].sum()
+    feature_importance = (
+        feature_importance
         .sort_values("importance", ascending=False)
+        .reset_index(drop=True)
     )
-    fig, ax = plt.subplots(figsize=(10, 6))
-    sns.barplot(data=group_summary, x="importance", y="group", palette="viridis", ax=ax)
-    ax.set_title("Feature Importance by Group")
-    ax.set_xlabel("Total Importance")
-    ax.set_ylabel("Feature Group")
-    fig.tight_layout()
-    fig.savefig(VISUALIZATION_DIR / "07_feature_importance_by_group.png", dpi=200)
-    plt.close(fig)
 
-    print("\nTOP 5 FEATURE IMPORTANCE:")
-    print(feature_importance.head(5).to_string(index=False))
-    print(f"\nVisualisasi feature importance disimpan di: {VISUALIZATION_DIR}")
-    print(f"Laporan evaluasi rule-based disimpan di: {REPORTS_DIR}")
-
-    return model, scaler
-
-
-def save_rule_based_evaluation_report(report: dict) -> None:
-    """Simpan laporan evaluasi rule-based dalam format JSON dan Markdown."""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    report_path = REPORTS_DIR / f"rule_based_evaluation_{timestamp}.json"
-    markdown_path = REPORTS_DIR / f"rule_based_evaluation_{timestamp}.md"
-
-    with report_path.open("w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
-
-    metrics = report["metrics"]
-    dist = report["status_distribution"]
-    md = f"""# Evaluasi Baseline Rule-Based ATM
-
-- Tanggal: {report['generated_at']}
-- Tipe model: {report['model_type']}
-- Data train: {report['dataset']['train_rows']} baris
-- Data test: {report['dataset']['test_rows']} baris
-- TID uji: {report['dataset']['tid_count']}
-
-## Aturan status
-
-- Kritis: <= 1 hari
-- Waspada: 2 sampai 3 hari
-- Aman: > 3 hari
-
-## Metrik evaluasi
-
-- MAE: {metrics['mae_days']:.2f} hari
-- R\u00b2: {metrics['r2_score']:.4f}
-- MAPE: {metrics['mape_percent']:.2f}%
-
-## Distribusi status hasil prediksi
-
-```json
-{json.dumps(dist, ensure_ascii=False, indent=2)}
-```
-"""
-    markdown_path.write_text(md, encoding="utf-8")
-
-    print(f"✅ Laporan JSON: {report_path}")
-    print(f"✅ Laporan Markdown: {markdown_path}")
-    return report_path
-
-
-def save_calendar_trend_evaluation_report(report: dict) -> None:
-    """Simpan laporan khusus untuk model berbasis kalender/tren seperti weekend, tanggal merah, gajian."""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    report_path = REPORTS_DIR / f"trend_calendar_event_evaluation_{timestamp}.json"
-    markdown_path = REPORTS_DIR / f"trend_calendar_event_evaluation_{timestamp}.md"
-
-    with report_path.open("w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
-
-    metrics = report["metrics"]
-    dist = report["status_distribution"]
-    focus = report["focus_features"]
-    pattern_summary = report["event_pattern_summary"]
-    md = f"""# Evaluasi Model Trend & Kalender ATM
-
-- Tanggal: {report['generated_at']}
-- Tipe model: {report['model_type']}
-- Data train: {report['dataset']['train_rows']} baris
-- Data test: {report['dataset']['test_rows']} baris
-- TID uji: {report['dataset']['tid_count']}
-
-## Fokus fitur
-
-- {focus[0]}
-- {focus[1]}
-- {focus[2]}
-- {focus[3]}
-- {focus[4]}
-- {focus[5]}
-- {focus[6]}
-- {focus[7]}
-- {focus[8]}
-- {focus[9]}
-- {focus[10]}
-
-## Pola tren yang dipertimbangkan
-
-- Weekend: {pattern_summary['weekend']}
-- Tanggal merah: {pattern_summary['tanggal_merah']}
-- Gajian: {pattern_summary['gajian']}
-
-## Metrik evaluasi
-
-- MAE: {metrics['mae_days']:.2f} hari
-- R\u00b2: {metrics['r2_score']:.4f}
-- MAPE: {metrics['mape_percent']:.2f}%
-
-## Distribusi status hasil prediksi
-
-```json
-{json.dumps(dist, ensure_ascii=False, indent=2)}
-```
-"""
-    markdown_path.write_text(md, encoding="utf-8")
-
-    print(f"✅ Laporan JSON model tren: {report_path}")
-    print(f"✅ Laporan Markdown model tren: {markdown_path}")
-    return report_path
-
-
-def save_hybrid_rule_trend_evaluation_report(report: dict) -> None:
-    """Simpan laporan gabungan rule-based dan trend/calendar dalam satu model."""
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    report_path = REPORTS_DIR / f"hybrid_rule_trend_evaluation_{timestamp}.json"
-    markdown_path = REPORTS_DIR / f"hybrid_rule_trend_evaluation_{timestamp}.md"
-
-    with report_path.open("w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
-
-    metrics = report["metrics"]
-    dist = report["status_distribution"]
-    focus = report["focus_features"]
-    hybrid = report["hybrid_summary"]
-    md = f"""# Evaluasi Model Gabungan Rule-Based + Trend ATM
-
-- Tanggal: {report['generated_at']}
-- Tipe model: {report['model_type']}
-- Data train: {report['dataset']['train_rows']} baris
-- Data test: {report['dataset']['test_rows']} baris
-- TID uji: {report['dataset']['tid_count']}
-
-## Kombinasi sinyal
-
-- Rule-based signal: {hybrid['rule_based_signal']}
-- Trend signal: {hybrid['trend_signal']}
-- Combined logic: {hybrid['combined_logic']}
-
-## Fokus fitur utama
-
-- {focus[0]}
-- {focus[1]}
-- {focus[2]}
-- {focus[3]}
-- {focus[4]}
-- {focus[5]}
-- {focus[6]}
-- {focus[7]}
-- {focus[8]}
-- {focus[9]}
-- {focus[10]}
-- {focus[11]}
-
-## Metrik evaluasi
-
-- MAE: {metrics['mae_days']:.2f} hari
-- R\u00b2: {metrics['r2_score']:.4f}
-- MAPE: {metrics['mape_percent']:.2f}%
-
-## Distribusi status hasil prediksi
-
-```json
-{json.dumps(dist, ensure_ascii=False, indent=2)}
-```
-"""
-    markdown_path.write_text(md, encoding="utf-8")
-
-    print(f"✅ Laporan JSON hybrid: {report_path}")
-    print(f"✅ Laporan Markdown hybrid: {markdown_path}")
-    return report_path
-
-
-# ==========================================================
-# 4. PREDIKSI DATA TERBARU PER TID
-# ==========================================================
-
-def predict_latest(df: pd.DataFrame, model, scaler) -> pd.DataFrame:
+    # Print
     print("\n" + "=" * 70)
-    print("PREDIKSI TANGGAL HABIS (DATA TERBARU PER TID)")
+    print("TOP 20 FEATURE IMPORTANCE")
     print("=" * 70)
 
-    # Ambil record terbaru per TID berdasarkan kolom updated
-    df_terbaru = (
-        df.sort_values(["tid", DT_COL])
-          .groupby("tid", as_index=False)
-          .last()
+    print(feature_importance.head(20).to_string(index=False))
+
+    # CSV
+    csv_path = REPORTS_DIR / "feature_importance.csv"
+    feature_importance.to_csv(csv_path, index=False)
+
+    # Visualization
+    top20 = (
+        feature_importance
+        .head(20)
+        .sort_values("importance", ascending=True)
     )
 
-    X_pred = df_terbaru[FITUR_ML].copy()
-    
-    # Handle missing values di prediksi
-    for col in FITUR_ML:
-        X_pred[col] = X_pred[col].fillna(X_pred[col].median() if len(X_pred) > 0 else 0)
-    
-    X_pred_scaled = scaler.transform(X_pred)
+    fig, ax = plt.subplots(figsize=(10, 8))
 
-    prediksi_hari = np.ceil(model.predict(X_pred_scaled)).astype(int)
-    prediksi_hari = np.maximum(prediksi_hari, 0)
+    ax.barh(top20["feature"], top20["importance"])
 
-    df_terbaru["prediksi_hari"] = prediksi_hari
-    df_terbaru["tanggal_habis"] = (
-        pd.to_datetime(df_terbaru[DT_COL]) +
-        pd.to_timedelta(df_terbaru["prediksi_hari"], unit="D")
-    ).dt.strftime("%d-%m-%Y")
-    
-    # Tambahkan threshold berdasarkan status operasional yang konsisten
-    df_terbaru["prediksi_hari"] = pd.to_numeric(
-        df_terbaru["prediksi_hari"], errors="coerce"
-    ).fillna(0)
-    df_terbaru["threshold"] = df_terbaru["prediksi_hari"].apply(status_from_hari)
+    ax.set_title(f"Feature Importance - {model_name}")
+    ax.set_xlabel("Importance")
+    ax.set_ylabel("Feature")
 
-    kolom_tampil = [
-        "tid", DT_COL, "sisa_pagu",
-        "ratas_harian", "prediksi_hari", "tanggal_habis", "threshold"
-    ]
-    print("\n📊 HASIL PREDIKSI (20 ATM TERAWAL):")
-    print(df_terbaru[kolom_tampil].head(20).to_string())
+    fig.tight_layout()
 
-    print(f"\n📊 STATISTIK PREDIKSI:")
-    print(f"  Total ATM         : {len(df_terbaru)}")
-    print(f"  Rata-rata prediksi: {df_terbaru['prediksi_hari'].mean():.1f} hari")
-    print(f"  Min prediksi      : {df_terbaru['prediksi_hari'].min()} hari")
-    print(f"  Max prediksi      : {df_terbaru['prediksi_hari'].max()} hari")
-    
-    # Distribusi threshold
-    print(f"\n📊 DISTRIBUSI THRESHOLD:")
-    print(df_terbaru['threshold'].value_counts().to_string())
-
-    return df_terbaru
-
-
-# ==========================================================
-# 5. SIMPAN HASIL PREDIKSI KE DATABASE
-# ==========================================================
-
-def save_predictions_to_db(df: pd.DataFrame) -> None:
-    """Menyimpan hasil prediksi ke tabel hasil_prediksi - hanya kolom esensial."""
-    from sqlalchemy import BigInteger, DateTime, Integer, String
-    from datetime import datetime
-    
-    print(f"\nMenyimpan hasil prediksi ke tabel '{PREDICTION_TABLE}'...")
-
-    # Kolom ESENSIAL untuk dashboard
-    kolom_simpan = [
-        "tid",
-        DT_COL,
-        "total_lmb",
-        "pagu_existing",
-        "sisa_pagu",
-        "ratas_harian",
-        "prediksi_hari",
-        "tanggal_habis",
-    ]
-    kolom_ada = [k for k in kolom_simpan if k in df.columns]
-    
-    df_save = df[kolom_ada].copy()
-    
-    # Tambahkan timestamp prediksi
-    df_save["prediksi_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    # Casting tipe data
-    df_save["tid"]           = df_save["tid"].astype(str)
-    df_save[DT_COL]          = pd.to_datetime(df_save[DT_COL])
-    df_save["tanggal_habis"] = df_save["tanggal_habis"].astype(str)
-    df_save["prediksi_at"]   = pd.to_datetime(df_save["prediksi_at"])
-
-    for col in ["total_lmb", "pagu_existing", "sisa_pagu", "ratas_harian", "prediksi_hari"]:
-        if col in df_save.columns:
-            df_save[col] = pd.to_numeric(df_save[col], errors="coerce").fillna(0).astype("int64")
-
-    # Dtype map untuk MySQL
-    dtype_map = {
-        "tid":           String(50),
-        DT_COL:          DateTime(),
-        "total_lmb":     BigInteger(),
-        "pagu_existing": BigInteger(),
-        "sisa_pagu":     BigInteger(),
-        "ratas_harian":  Integer(),
-        "prediksi_hari": Integer(),
-        "tanggal_habis": String(20),
-        "prediksi_at":   DateTime(),
-    }
-    dtype_map = {k: v for k, v in dtype_map.items() if k in df_save.columns}
-    
-    print(f"Kolom yang disimpan: {list(df_save.columns)}")
-
-    engine = get_db_engine()
-    df_save.to_sql(
-        name=PREDICTION_TABLE,
-        con=engine,
-        if_exists="replace",
-        index=False,
-        chunksize=1000,
-        dtype=dtype_map,
+    image_path = (
+        VISUALIZATION_DIR / "06_feature_importance_top20.png"
     )
-    print(f"✅ Berhasil menyimpan {len(df_save)} baris ke tabel '{PREDICTION_TABLE}'")
+
+    fig.savefig(image_path, dpi=200)
+    plt.close(fig)
+
+    print(f"\nFeature importance CSV: {csv_path}")
+    print(f"Feature importance image: {image_path}")
+
+    return feature_importance
 
 
 # ==========================================================
-# 6. SIMPAN MODEL KE DISK
+# 10. SAVE MODEL KE FOLDER backend/models
 # ==========================================================
+
 
 def save_models(model, scaler) -> None:
-    joblib.dump(model,    MODELS_DIR / "model_prediksi_habis.pkl")
-    joblib.dump(scaler,   MODELS_DIR / "scaler.pkl")
-    joblib.dump(FITUR_ML, MODELS_DIR / "fitur.pkl")
+    """Simpan model, scaler, dan daftar fitur ke folder backend/models."""
+    model_path = MODELS_DIR / "model_prediksi_habis.pkl"
+    scaler_path = MODELS_DIR / "scaler.pkl"
+    fitur_path = MODELS_DIR / "fitur.pkl"
 
-    print("\n✅ Model disimpan ke:")
-    print(f"  {MODELS_DIR / 'model_prediksi_habis.pkl'}")
-    print(f"  {MODELS_DIR / 'scaler.pkl'}")
-    print(f"  {MODELS_DIR / 'fitur.pkl'}")
+    joblib.dump(model, model_path)
+    joblib.dump(scaler, scaler_path)
+    joblib.dump(FITUR_ML, fitur_path)
+
+    print("\n✅ Model disimpan ke folder backend/models:")
+    print(f"  - {model_path}")
+    print(f"  - {scaler_path}")
+    print(f"  - {fitur_path}")
 
 
 # ==========================================================
-# MAIN
+# 11. SAVE EVALUATION REPORT
 # ==========================================================
+
+def save_evaluation_report(evaluation, model_name, train_df, test_df):
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    report = {
+        "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "model": {
+            "name": model_name,
+            "type": "regression",
+            "target": TARGET,
+            "random_state": 42,
+        },
+        "dataset": {
+            "total_rows": int(len(train_df) + len(test_df)),
+            "train_rows": int(len(train_df)),
+            "test_rows": int(len(test_df)),
+            "train_tid": int(train_df["tid"].nunique()),
+            "test_tid": int(test_df["tid"].nunique()),
+        },
+        "features": {
+            "count": len(FITUR_ML),
+            "names": FITUR_ML,
+        },
+        "split": {
+            "method": "time_series_split_per_tid",
+            "train_ratio": 0.80,
+            "test_ratio": 0.20,
+        },
+        "parameters": (
+            LIGHTGBM_CONFIG
+            if model_name == "LightGBM"
+            else RANDOM_FOREST_CONFIG
+        ),
+        "metrics": {
+            "model": evaluation["model_metrics"],
+            "business_rule_baseline": evaluation["baseline_metrics"],
+            "mae_improvement_percent": evaluation["mae_improvement_percent"],
+        },
+        "error_tolerance": {
+            "within_1_day_percent": evaluation["model_metrics"]["within_1_day_percent"],
+            "within_2_days_percent": evaluation["model_metrics"]["within_2_days_percent"],
+            "within_3_days_percent": evaluation["model_metrics"]["within_3_days_percent"],
+        },
+        "status_distribution": evaluation["status_distribution"],
+        "baseline_definition": {
+            "condition": "sisa_pagu < ratas_harian",
+            "result": "0 hari",
+            "formula": "floor(sisa_pagu / ratas_harian) - 1",
+        },
+    }
+
+    json_path = REPORTS_DIR / f"model_evaluation_{timestamp}.json"
+
+    with json_path.open("w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+
+    latest_path = REPORTS_DIR / "model_evaluation_latest.json"
+
+    with latest_path.open("w", encoding="utf-8") as f:
+        json.dump(report, f, ensure_ascii=False, indent=2)
+
+    # Markdown
+    metrics = evaluation["model_metrics"]
+    baseline = evaluation["baseline_metrics"]
+
+    md = f"""
+# Evaluasi Model Prediksi Tanggal Habis ATM
+
+## Model
+
+- Nama model: {model_name}
+- Tipe: Regression
+- Target: `{TARGET}`
+
+## Dataset
+
+- Total data: {len(train_df) + len(test_df):,}
+- Training: {len(train_df):,}
+- Testing: {len(test_df):,}
+- TID training: {train_df['tid'].nunique():,}
+- TID testing: {test_df['tid'].nunique():,}
+
+## Metode Split
+
+Time-Series Split per TID.
+
+- Training: 80%
+- Testing: 20%
+
+Data testing merupakan periode waktu setelah data training pada masing-masing TID.
+
+## Parameter Model
+
+```text
+{json.dumps(
+    LIGHTGBM_CONFIG
+    if model_name == "LightGBM"
+    else RANDOM_FOREST_CONFIG,
+    indent=2,
+)}
+```
+
+## Hasil Evaluasi
+
+| Metrik | Nilai |
+| --- | ---: |
+| MAE | {metrics['mae_days']:.4f} hari |
+| RMSE | {metrics['rmse_days']:.4f} hari |
+| R² | {metrics['r2']:.4f} |
+| Median AE | {metrics['median_absolute_error_days']:.4f} hari |
+| MAPE | {metrics['mape_percent']:.2f}% |
+| Error <= 1 hari | {metrics['within_1_day_percent']:.2f}% |
+| Error <= 2 hari | {metrics['within_2_days_percent']:.2f}% |
+| Error <= 3 hari | {metrics['within_3_days_percent']:.2f}% |
+
+## Baseline Bisnis
+
+| Metrik | Nilai |
+| --- | ---: |
+| MAE | {baseline['mae_days']:.4f} hari |
+| RMSE | {baseline['rmse_days']:.4f} hari |
+| R² | {baseline['r2']:.4f} |
+
+## Perubahan MAE
+
+- Baseline MAE: {baseline['mae_days']:.4f}
+- Model MAE: {metrics['mae_days']:.4f}
+- Perubahan: {evaluation['mae_improvement_percent']:.2f}%
+
+## Status Distribusi
+
+```text
+{json.dumps(evaluation['status_distribution'], indent=2, ensure_ascii=False)}
+```
+"""
+
+    md_path = REPORTS_DIR / f"model_evaluation_{timestamp}.md"
+    latest_md_path = REPORTS_DIR / "model_evaluation_latest.md"
+
+    md_path.write_text(md, encoding="utf-8")
+    latest_md_path.write_text(md, encoding="utf-8")
+
+    print(f"\nEvaluation JSON: {json_path}")
+    print(f"Evaluation markdown: {md_path}")
+
+    return {
+        "json_path": str(json_path),
+        "markdown_path": str(md_path),
+    }
+
+
+# ==========================================================
+# 12. MAIN
+# ==========================================================
+
 
 def main():
     print("=" * 70)
-    print("ML PREDIKSI TANGGAL HABIS ATM")
+    print("TRAINING MODEL PREDIKSI TANGGAL HABIS ATM")
     print("=" * 70)
 
-    try:
-        # 1. Load dari tabel preprocessing
-        df = load_preprocessing()
-        
-        # 2. Validasi target dengan business rule
-        df = validate_target(df)
+    df = load_preprocessing()
+    df = validate_target(df)
+    df = clean_training_data(df)
 
-        # 3. Training
-        model, scaler = train(df)
+    train_df, test_df = time_series_split(df)
 
-        # 4. Prediksi data terbaru per TID
-        df_hasil = predict_latest(df, model, scaler)
+    X_train = train_df[FITUR_ML].copy()
+    y_train = train_df[TARGET].astype(float)
 
-        # 5. Simpan hasil ke tabel hasil_prediksi di database
-        save_predictions_to_db(df_hasil)
+    model, scaler, model_name = train_model(X_train, y_train)
+    evaluation = evaluate_model(model, scaler, model_name, train_df, test_df)
 
-        # 6. Simpan model ke disk
-        save_models(model, scaler)
+    save_feature_importance(model, model_name)
+    save_models(model, scaler)
+    save_evaluation_report(evaluation, model_name, train_df, test_df)
 
-        print("\n" + "=" * 70)
-        print("✅ SELESAI! Model siap digunakan untuk prediksi realtime.")
-        print("=" * 70)
-        
-    except Exception as e:
-        print(f"\n❌ ERROR: {e}")
-        raise
+    print("\n" + "=" * 70)
+    print("✅ TRAINING SELESAI")
+    print("=" * 70)
 
 
 if __name__ == "__main__":

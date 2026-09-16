@@ -1,67 +1,70 @@
-# Panduan Teknis — Sistem Prediksi Tanggal Habis Saldo ATM
+# Dokumen Teknis — Sistem Prediksi Tanggal Habis Saldo ATM
 
 ## 1. Ringkasan Proyek
 
 Proyek ini adalah sistem prediksi tanggal habis saldo ATM yang menggabungkan:
 
 - preprocessing data ATM dari MySQL,
-- feature engineering berbasis kalender dan trend,
+- feature engineering berbasis kalender, tren, dan pola historis,
 - model machine learning (LightGBM dengan fallback ke RandomForest),
-- rule business logic untuk validasi dan fallback,
 - scheduler otomatis untuk prediksi realtime dan retraining,
-- dashboard Laravel yang menampilkan hasil akhir dari `hasil_prediksi`.
+- API FastAPI dan frontend Laravel untuk menampilkan hasil `hasil_prediksi`.
 
-Tujuan utamanya adalah memberi estimasi kapan saldo ATM akan habis agar operasional pengisian dana bisa direncanakan lebih dini dan lebih aman.
+Tujuan utamanya adalah memperkirakan kapan saldo ATM akan habis agar operasional pengisian dana dapat direncanakan lebih awal dan lebih aman.
 
 ---
 
-## 2. Arsitektur Sistem
+## 2. Arsitektur Sistem Saat Ini
 
 ### 2.1 Backend Python
 
-Backend utama berada di folder `backend`, dan berisi:
+Folder aktif utama:
 
-- `app/main.py` → entrypoint FastAPI
-- `app/scheduler.py` → scheduler APScheduler
-- `app/api/routes/predictions.py` → endpoint API
-- `app/services/prediction_service.py` → query DB ke `hasil_prediksi`
-- `scripts/data_preprocessing.py` → preprocessing dan feature engineering
-- `scripts/train_model.py` → training model dan evaluasi
-- `scripts/predict_realtime.py` → prediksi realtime dan fallback rule
-- `config/config.py` → konfigurasi DB dan environment
+- `backend/app/main.py` → entrypoint FastAPI dan lifespan startup/shutdown
+- `backend/app/scheduler.py` → APScheduler untuk job realtime dan retraining
+- `backend/app/api/routes/predictions.py` → endpoint data prediksi
+- `backend/app/services/prediction_service.py` → query dan serialisasi ke `hasil_prediksi`
+- `backend/config/config.py` → konfigurasi koneksi DB dan env
+- `backend/scripts/data_preprocessing.py` → preprocessing + feature engineering
+- `backend/scripts/train_model.py` → training model, evaluasi, dan save artefak
+- `backend/scripts/predict_realtime.py` → prediksi realtime dan status akhir berdasarkan output model
+- `backend/scripts/calendar_features.py` → kalender, libur nasional, payday
 
 ### 2.2 Frontend Laravel
 
-Frontend berada di folder `frontend` dan berisi:
+Folder aktif:
 
-- `app/Http/Controllers/DashboardController.php` → ambil data dari API dan kirim ke Blade
-- `app/Services/ApiService.php` → HTTP client ke FastAPI
-- `resources/views/dashboard.blade.php` → tampilan dashboard
+- `frontend/app/Http/Controllers/DashboardController.php` → ambil data dari API dan kirim ke Blade
+- `frontend/app/Services/ApiService.php` → HTTP client ke FastAPI
+- `frontend/resources/views/dashboard.blade.php` → tampilan dashboard
 
 ### 2.3 Database
 
-Database utama yang dipakai saat ini adalah MySQL dengan tabel yang relevan:
+Database utama saat ini adalah MySQL dengan tabel utama:
 
 - `data_2026` → data raw ATM
-- `preprocessing` → data hasil preprocessing dan feature engineering
+- `preprocessing` → data hasil ETL + feature engineering
 - `hasil_prediksi` → hasil prediksi final per TID
+- `holiday_cache` → cache hari libur nasional untuk mengurangi panggilan API
 
 ---
 
-## 3. Alur Sistem yang Benar di Proyek Ini
+## 3. Alur Sistem yang Dipakai Saat Ini
 
 ### 3.1 Flow data end-to-end
 
 ```text
 data_2026 (MySQL)
     ↓
+backend/scripts/data_preprocessing.py
+    ↓
 preprocessing
     ↓
-train_model.py
+backend/scripts/train_model.py
     ↓
 model + scaler + fitur.pkl
     ↓
-predict_realtime.py
+backend/scripts/predict_realtime.py
     ↓
 hasil_prediksi
     ↓
@@ -70,37 +73,45 @@ FastAPI /api/predictions
 Laravel dashboard
 ```
 
-### 3.2 Penjelasan arahnya
+### 3.2 Penjelasan alur
 
-1. Data raw ATM diproses di `data_preprocessing.py`.
-2. Hasil preprocessing disimpan ke tabel `preprocessing`.
-3. Model dilatih ulang dari `preprocessing` menggunakan `train_model.py`.
-4. Saat realtime job berjalan, `predict_realtime.py` membaca data terbaru per TID dari `preprocessing`.
-5. Model memprediksi `prediksi_hari` lalu dikonversi menjadi status operasional.
-6. Jika hasil model terlalu berbeda dari business rule, maka fallback rule diterapkan.
-7. Hasil final di-upsert ke `hasil_prediksi`.
-8. Laravel mengambil data dari `hasil_prediksi` melalui FastAPI.
+1. Data raw ATM dibaca dari MySQL di `data_2026`.
+2. `data_preprocessing.py` membersihkan, mengelompokkan, menghitung fitur, dan menyimpan hasil ke `preprocessing`.
+3. `train_model.py` membaca `preprocessing`, melakukan time-series split, training, evaluasi, lalu menyimpan model ke `backend/models/`.
+4. `predict_realtime.py` membaca data terbaru per TID dari `preprocessing`, melakukan inferensi, lalu menulis hasil ke `hasil_prediksi`.
+5. Scheduler memanggil proses preprocessing dan prediksi otomatis secara periodik.
+6. API FastAPI membaca data dari `hasil_prediksi` dan dikonsumsi oleh dashboard Laravel.
+
+### 3.3 Pipeline bersih yang dipelihara
+
+Versi saat ini telah dibersihkan dari fungsi yang tidak dipakai dan alur yang terlalu bercabang. Prinsip yang dipakai adalah:
+
+- satu sumber data utama: `data_2026`
+- satu tabel preprocessing: `preprocessing`
+- satu tabel output final: `hasil_prediksi`
+- satu fungsi status konsisten: `status_from_hari()`
+- satu jalur data utama: raw → preprocessing → model → prediksi → API → dashboard
 
 ---
 
 ## 4. Preprocessing dan Fitur yang Dipakai
 
-File yang bertanggung jawab: `backend/scripts/data_preprocessing.py`
+File utama: `backend/scripts/data_preprocessing.py`
 
 ### 4.1 Tujuan preprocessing
 
 Preprocessing bertugas:
 
 - membaca data ATM harian dari `data_2026`,
-- mengelompokkan per TID,
-- menghitung indikator seperti `total_lmb`, `pagu_existing`, `sisa_pagu`, `ratas_harian`,
-- menghitung feature kalender seperti weekend, holiday, payday,
-- menambahkan feature rolling, lag, cumulative, dan interaction,
-- menyimpan hasilnya ke tabel `preprocessing`.
+- mengelompokkan data per TID,
+- menghitung indikator seperti `total_lmb`, `sisa_pagu`, `ratas_harian`, `selisih_lmb`,
+- menambahkan fitur kalender seperti weekend, holiday, payday,
+- menambahkan rolling, lag, cumulative, dan interaction features,
+- menyimpan hasil ke tabel `preprocessing` agar siap dipakai model.
 
-### 4.2 Fitur yang dihasilkan
+### 4.2 Fitur utama yang dipakai model
 
-Beberapa fitur utama yang dipakai model:
+Fitur utama meliputi:
 
 - `sisa_pagu`
 - `ratas_harian`
@@ -111,13 +122,13 @@ Beberapa fitur utama yang dipakai model:
 - `rolling_7d`, `rolling_14d`, `rolling_30d`
 - `trend_7d_ratio`, `trend_14d_ratio`
 - `lag_1_ratas`, `lag_7_ratas`, `lag_14_ratas`
-- feature interaction seperti `weekend_x_trend`, `payday_x_trend`, `holiday_x_trend`
+- interaction seperti `weekend_x_trend`, `payday_x_trend`, `holiday_x_trend`
 
-Semua fitur ini harus ada pada data yang digunakan untuk training dan inference agar model tetap konsisten.
+Semua fitur ini harus konsisten antara training dan inference.
 
 ---
 
-## 5. Rule Bisnis yang Digunakan
+## 5. Rule Bisnis dan Status yang Digunakan
 
 ### 5.1 Aturan status final
 
@@ -127,31 +138,32 @@ Aturan status yang dipakai secara konsisten adalah:
 - `2 sampai 3 hari` → `🟠 Waspada`
 - `> 3 hari` → `🟢 Aman`
 
-Implementasinya ada di `backend/scripts/predict_realtime.py` dengan fungsi:
+Implementasinya ada di `backend/scripts/predict_realtime.py` dalam fungsi:
 
 - `status_from_hari(hari)`
 
-Ini adalah sumber status yang seharusnya dipakai di semua layer untuk menjaga konsistensi.
+Fungsi ini menjadi sumber status tunggal untuk menjaga konsistensi antar layer.
 
-### 5.2 Rule business-day untuk fallback
+### 5.2 Rule business-day sebagai referensi evaluasi
 
 Fungsi `business_rule_days(sisa_pagu, ratas_harian)` menghitung estimasi hari habis sebagai berikut:
 
-- kalau `sisa_pagu < ratas_harian` → `0`
-- kalau `sisa_pagu >= ratas_harian` → `int(sisa_pagu / ratas_harian) - 1`
+- jika `sisa_pagu < ratas_harian` → `0`
+- jika `sisa_pagu >= ratas_harian` → `int(sisa_pagu / ratas_harian) - 1`
 
-Di `apply_business_rule_fallback()` logic-nya adalah:
+Pada implementasi saat ini, business rule tidak digunakan sebagai override aktif di prediksi realtime. Fungsi ini dipakai terutama untuk:
 
-- hitung `business_rule_hari`
-- hitung selisih absolut terhadap `prediksi_hari`
-- hitung persentase selisih relatif terhadap `business_rule_hari`
-- jika persentase selisih `> 50%`, maka prediksi model diganti dengan `business_rule_hari`
+- membandingkan output model terhadap baseline bisnis,
+- memahami apakah pola model masih sesuai logika operasional,
+- keperluan evaluasi dan audit, bukan pengganti hasil model.
 
-Artinya, fallback ini hanya terjadi untuk kasus yang benar-benar jauh dari rule bisnis, bukan untuk semua TID.
+### 5.3 Konsistensi status di frontend
 
-### 5.3 Catatan penting: satu sumber aturan
+Frontend tidak diperbolehkan memakai label status yang berbeda dari backend. Prioritas yang benar adalah:
 
-Untuk menjaga hasil dashboard sama dengan hasil scheduler/backend, aturan status harus dipakai di satu fungsi tunggal. Di proyek saat ini, yang dipakai sebagai sumber utama adalah `status_from_hari()`, lalu frontend di dashboard memprioritaskan `prediksi_hari` sebelum membaca `threshold` string.
+1. gunakan `prediksi_hari` sebagai sumber utama,
+2. hitung statusnya dengan aturan yang sama,
+3. baru gunakan `threshold` jika field itu tersedia untuk referensi.
 
 ---
 
@@ -159,11 +171,11 @@ Untuk menjaga hasil dashboard sama dengan hasil scheduler/backend, aturan status
 
 ### 6.1 Algoritma
 
-Pada training, model utama adalah:
+Model utama yang dipakai saat ini:
 
 - `LightGBMRegressor`
 
-Jika LightGBM tidak tersedia atau gagal, maka fallback ke:
+Jika LightGBM tidak tersedia atau gagal, fallback ke:
 
 - `RandomForestRegressor`
 
@@ -173,18 +185,20 @@ Proses scaling menggunakan:
 
 ### 6.2 Tahapan training
 
-Di `train_model.py`, training dijalankan melalui beberapa tahapan:
+`backend/scripts/train_model.py` melakukan proses berikut:
 
-1. load data dari `preprocessing`
-2. validasi target dengan rule bisnis
-3. cleaning dan handling missing value
-4. time-series split per TID
-5. scaling fitur
-6. training model
-7. evaluasi: MAE, R², MAPE
-8. simpan model ke `backend/models/`
+1. membaca data dari `preprocessing`,
+2. validasi target dengan business rule sebagai referensi pemahaman data,
+3. membersihkan missing value dan outlier,
+4. melakukan time-series split per TID,
+5. scaling fitur,
+6. training model LightGBM,
+7. evaluasi MAE, R², RMSE, MAPE, dan perbandingan terhadap baseline bisnis,
+8. menyimpan artefak ke `backend/models/`.
 
-Model yang disimpan di folder `backend/models/` meliputi:
+Perlu dicatat bahwa baseline bisnis hanya dipakai untuk analisis evaluasi, bukan untuk mengganti hasil prediksi yang sudah dihasilkan model pada runtime.
+
+Artefak aktif yang dipakai sistem:
 
 - `model_prediksi_habis.pkl`
 - `scaler.pkl`
@@ -196,27 +210,23 @@ Model yang disimpan di folder `backend/models/` meliputi:
 
 File utama: `backend/scripts/predict_realtime.py`
 
-### 7.1 Job realtime
+### 7.1 Proses realtime
 
-Prediksi realtime berjalan melalui fungsi:
+Prediksi realtime berjalan melalui fungsi `main()` dan melakukan:
 
-- `main()`
+1. membaca record terbaru per TID dari `preprocessing`,
+2. memvalidasi fitur yang dibutuhkan model,
+3. memuat model dan scaler dari disk,
+4. menjalankan `model.predict()`,
+5. mengubah hasil menjadi `prediksi_hari`,
+6. menghitung `tanggal_habis`,
+7. menetapkan `threshold` berdasarkan `status_from_hari()`
+8. menerapkan fallback business rule bila perlu,
+9. melakukan upsert ke `hasil_prediksi`.
 
-Prosesnya:
+### 7.2 Output penting yang disimpan
 
-1. baca record terbaru per TID dari tabel `preprocessing`
-2. validasi fitur yang dipakai model
-3. load model dan scaler dari disk
-4. lakukan `model.predict()`
-5. konversi hasil ke `prediksi_hari`
-6. hitung `tanggal_habis`
-7. assign `threshold` berdasarkan `status_from_hari()`
-8. apply fallback rule jika selisih lebih dari 50%
-9. upsert hasil ke `hasil_prediksi`
-
-### 7.2 Output yang disimpan
-
-Kolom utama yang dipakai untuk dashboard adalah:
+Kolom utama yang dibaca oleh dashboard adalah:
 
 - `tid`
 - `updated`
@@ -229,15 +239,17 @@ Kolom utama yang dipakai untuk dashboard adalah:
 - `threshold`
 - `prediksi_at`
 
-### 7.3 Distribusi status yang muncul
+Pada implementasi saat ini, `prediksi_hari` dari model menjadi sumber utama. Nilai `threshold` hanya dipakai sebagai label status yang diturunkan dari `prediksi_hari`, tanpa override dari business rule.
 
-Hasil distribusi status dihitung dari `prediksi_hari` secara konsisten lewat:
+### 7.3 Distribusi status
+
+Distribusi status dihitung dari `prediksi_hari` dengan fungsi tunggal:
 
 ```python
 status_from_hari(v)
 ```
 
-sehingga semua output punya label yang sama.
+Sehingga seluruh output baik di scheduler, API, maupun dashboard akan konsisten dan tetap mengikuti hasil model tanpa intervensi rule base.
 
 ---
 
@@ -340,27 +352,27 @@ Untuk menjaga dashboard sama dengan backend, UI tidak boleh memakai aturan statu
 
 ---
 
-## 11. Perbedaan Model-Only vs Fallback Final
+## 11. Model-Only vs Baseline Bisnis
 
-Dalam implementasi saat ini, ada dua kondisi hasil yang mungkin muncul:
+Saat ini, sistem memakai pendekatan model-only untuk output runtime.
 
 ### 11.1 Model-only
 
-Output hanya dari model tanpa business-rule fallback.
+Output runtime berasal sepenuhnya dari model ML:
 
-- prediksi bersifat murni dari ML,
+- prediksi bersifat murni dari model,
 - status ditentukan dari `prediksi_hari` model,
-- biasanya lebih konsisten dengan pola model dan evaluasi training.
+- lebih konsisten dengan pola training dan inferensi yang sudah dikalibrasi.
 
-### 11.2 Fallback final
+### 11.2 Baseline bisnis untuk evaluasi
 
-Output akhir yang dipakai untuk scheduler / `hasil_prediksi` saat rule fallback aktif.
+Business rule dipakai sebagai baseline referensi, bukan fallback runtime:
 
-- model memprediksi nilai awal,
-- apabila selisih >50% terhadap rule bisnis, nilai diganti,
-- hasil final kemudian disimpan ke DB dan ditampilkan di dashboard.
+- model membandingkan hasilnya dengan `business_rule_days()`,
+- evaluasi menampilkan selisih MAE dan metrik lainnya,
+- hasil akhir yang disimpan ke `hasil_prediksi` tetap mengikuti output model.
 
-Dengan kata lain, `hasil_prediksi` bukan selalu model-only; bisa berupa hasil model yang sudah dimodifikasi oleh business rule.
+Dengan kata lain, `hasil_prediksi` saat ini bersifat model-only dan tidak lagi di-override oleh business rule pada proses runtime.
 
 ---
 
@@ -384,7 +396,7 @@ Beberapa hal yang sudah diterapkan pada proyek saat ini:
 - frontend dashboard memprioritaskan `prediksi_hari` untuk menentukan status.
 - scheduler menjalankan preprocessing + prediksi realtime.
 - laporan evaluasi training baru disimpan bila `SAVE_EVAL_REPORTS` diaktifkan.
-- fallback business rule ditambahkan pada `predict_realtime.py` untuk menjaga hasil sesuai logika operasional.
+- business rule tetap tersedia sebagai baseline evaluasi, tetapi tidak lagi digunakan untuk mengganti output model pada runtime.
 
 ---
 
@@ -1576,7 +1588,7 @@ protected $baseUrl = 'http://127.0.0.1:8001';
 
 ### Development — Backend
 
-```bash
+```bashuvi
 cd backend/
 python3 -m venv .venv
 source .venv/bin/activate
@@ -1743,7 +1755,557 @@ Log error:
 2026-09-01 08:15:00 [ERROR] [Scheduler] Prediksi realtime gagal: <pesan error>
 Traceback (most recent call last): ...
 ```
+#!/usr/bin/env python
+"""
+Prediksi Realtime ATM
+---------------------
+Alur:
+  1. Ambil data terbaru dari SOURCE_TABLE.
+  2. Identifikasi TID yang aktif pada data tersebut.
+  3. Jalankan data_preprocessing (full, semua TID) untuk rebuild preprocessing.
+  4. Baca 1 baris terbaru per TID dari preprocessing.
+  5. Validasi fitur sesuai model.
+  6. Load model → predict.
+  7. UPSERT ke hasil_prediksi — hanya TID yang dibaca.
 
+Karakteristik:
+  - Sumber data       : RAW data_2026 (via preprocessing)
+  - Data yang dibaca  : 1 baris terbaru per TID (semua TID dari preprocessing)
+  - Butuh preprocessing: Ya (data_preprocessing.main() dijalankan lebih dulu)
+  - Skip jika tdk baru: Tidak ada checkpoint.
+  - Simpan            : UPSERT hanya TID yang diproses
+"""
+
+import json
+import sys
+import warnings
+import os
+from datetime import datetime
+from pathlib import Path
+
+import joblib
+import numpy as np
+import pandas as pd
+from sqlalchemy import BigInteger, DateTime, Integer, String, text
+
+warnings.filterwarnings("ignore")
+
+# ----------------------------------------------------------
+# PATH & KONFIGURASI
+# ----------------------------------------------------------
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+MODELS_DIR   = PROJECT_ROOT / "models"
+SCRIPTS_DIR  = Path(__file__).resolve().parent
+
+for p in [str(PROJECT_ROOT), str(SCRIPTS_DIR)]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+from config.config import get_db_engine
+
+SOURCE_TABLE     = os.getenv("SOURCE_TABLE",     "data_2026")
+PREPROCESS_TABLE = os.getenv("PREPROCESS_TABLE") or "preprocessing"
+PREDICTION_TABLE = os.getenv("PREDICTION_TABLE") or "hasil_prediksi"
+DT_COL           = "updated"
+
+PAYDAY_DATE          = os.getenv("PAYDAY_DATE", "25")
+CALENDARIFIC_API_KEY = os.getenv("CALENDARIFIC_API_KEY", "")
+HOLIDAY_COUNTRY      = os.getenv("HOLIDAY_COUNTRY", "ID")
+BUSINESS_RULE_FALLBACK_ENABLED = os.getenv("BUSINESS_RULE_FALLBACK_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def business_rule_days(sisa_pagu, ratas_harian):
+    """Hitung estimasi hari habis dengan cast ke int lalu kurangi 1 sebelum simpan.
+
+    Aturan:
+      - jika sisa_pagu < ratas_harian -> 0
+      - jika cukup, hitung int(sisa_pagu / ratas_harian) lalu kurangi 1
+    Ini memastikan tidak ada float dan tanggal_habis mengikuti jumlah_hari final.
+    """
+    if pd.isna(sisa_pagu) or pd.isna(ratas_harian):
+        return 0
+
+    sisa_pagu = float(sisa_pagu)
+    ratas_harian = float(ratas_harian)
+    if ratas_harian == 0:
+        return 0
+
+    if sisa_pagu < ratas_harian:
+        return 0
+
+    raw = int(sisa_pagu / ratas_harian)
+    return max(raw - 1, 0)
+
+
+def status_from_hari(hari):
+    """Return label status tunggal yang dipakai seluruh layer.
+
+    Aturan konsisten:
+      - <= 1 hari  -> 🔴 Kritis
+      - 2 sampai 3 hari -> 🟠 Waspada
+      - > 3 hari -> 🟢 Aman
+    """
+    if hari is None or pd.isna(hari):
+        return "🟢 Aman"
+
+    h = int(float(hari))
+    if h <= 1:
+        return "🔴 Kritis"
+    if h <= 3:
+        return "🟠 Waspada"
+    return "🟢 Aman"
+
+print(f"[CONFIG] SOURCE_TABLE        : {SOURCE_TABLE}")
+print(f"[CONFIG] PREPROCESS_TABLE    : {PREPROCESS_TABLE}")
+print(f"[CONFIG] PAYDAY_DATE         : {PAYDAY_DATE}")
+print(f"[CONFIG] CALENDARIFIC_API_KEY: {'*SET*' if CALENDARIFIC_API_KEY else '(tidak diset — pakai fallback)'}")
+
+
+# ==========================================================
+# FITUR MODEL
+# ==========================================================
+
+def get_model_feature_list():
+    feature_file = MODELS_DIR / "fitur.pkl"
+    if feature_file.exists():
+        return joblib.load(feature_file)
+    try:
+        from train_model import FITUR_ML
+        return FITUR_ML
+    except Exception:
+        raise FileNotFoundError(
+            "File model belum dibuat. Jalankan train_model.py terlebih dahulu."
+        )
+
+
+FITUR_ML = get_model_feature_list()
+
+
+# ==========================================================
+# 1. CEK DATA RAW
+# ==========================================================
+
+def check_new_raw(engine) -> tuple:
+    """Ambil TID yang aktif dari SOURCE_TABLE tanpa checkpoint."""
+    df_max = pd.read_sql(
+        f"SELECT MAX({DT_COL}) AS max_ts FROM {SOURCE_TABLE}", con=engine
+    )
+    max_ts = pd.to_datetime(df_max["max_ts"].iloc[0]) if not df_max.empty else None
+
+    if max_ts is None or pd.isna(max_ts):
+        return None, [], False
+
+    df_tids = pd.read_sql(f"SELECT DISTINCT tid FROM {SOURCE_TABLE}", con=engine)
+    tids = df_tids["tid"].tolist()
+
+    if not tids:
+        print("[RAW] Tidak ada data di SOURCE_TABLE.")
+        return None, [], False
+
+    print(f"[RAW] Total {len(tids)} TID aktif ditemukan. Maks timestamp: {max_ts}")
+    return max_ts, tids, True
+
+
+# ==========================================================
+# 2. LOAD DATA DARI preprocessing (1 baris terbaru per TID)
+# ==========================================================
+
+def load_latest_from_preprocessing(engine) -> pd.DataFrame:
+    """
+    Baca 1 baris terbaru per TID dari tabel preprocessing.
+    Tabel ini sudah diisi oleh data_preprocessing.main() sebelum fungsi ini dipanggil.
+    """
+    print("=" * 70)
+    print("LOAD DATA TERBARU PER TID DARI preprocessing")
+    print("=" * 70)
+
+    query = f"""
+        SELECT t.*
+        FROM {PREPROCESS_TABLE} t
+        INNER JOIN (
+            SELECT tid, MAX({DT_COL}) AS max_updated
+            FROM {PREPROCESS_TABLE}
+            GROUP BY tid
+        ) latest
+        ON t.tid = latest.tid
+        AND t.{DT_COL} = latest.max_updated
+    """
+    df = pd.read_sql(query, con=engine)
+    print(f"Data dimuat : {len(df)} TID, {len(df.columns)} kolom")
+    print(f"Timestamp terbaru : {df[DT_COL].max() if not df.empty else 'kosong'}")
+    return df
+
+
+# ==========================================================
+# 3. FILTER HANYA TID TERDAMPAK
+# ==========================================================
+
+def filter_affected_tids(df: pd.DataFrame, affected_tids: list) -> pd.DataFrame:
+    """Ambil hanya baris untuk TID yang punya data RAW baru."""
+    df_filtered = df[df["tid"].isin(affected_tids)].copy()
+    print(f"\n[Filter] {len(df_filtered)} dari {len(df)} TID akan diprediksi ulang.")
+    return df_filtered
+
+
+# ==========================================================
+# 4. VALIDASI FITUR
+# ==========================================================
+
+def validate_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Validasi ketersediaan fitur dan isi missing value dengan median."""
+    if df.empty:
+        raise ValueError("Tidak ada data untuk diprediksi.")
+
+    df = df.copy()
+    df[DT_COL] = pd.to_datetime(df[DT_COL], errors="coerce")
+
+    missing_cols = [col for col in FITUR_ML if col not in df.columns]
+    if missing_cols:
+        raise ValueError(
+            f"Kolom fitur tidak ditemukan: {missing_cols}\n"
+            "Pastikan data_preprocessing.py sudah dijalankan."
+        )
+
+    for col in FITUR_ML:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+        if df[col].isna().any():
+            df[col] = df[col].fillna(df[col].median())
+
+    print(f"\nValidasi fitur : {len(FITUR_ML)} fitur siap | {len(df)} TID")
+    return df
+
+
+# ==========================================================
+# 5. LOAD MODEL
+# ==========================================================
+
+def load_model():
+    """Memuat model, scaler, dan daftar fitur dari disk."""
+    model_path  = MODELS_DIR / "model_prediksi_habis.pkl"
+    scaler_path = MODELS_DIR / "scaler.pkl"
+    fitur_path  = MODELS_DIR / "fitur.pkl"
+
+    for p in [model_path, scaler_path, fitur_path]:
+        if not p.exists():
+            raise FileNotFoundError(
+                f"File model tidak ditemukan: {p}\n"
+                "Jalankan train_model.py terlebih dahulu."
+            )
+
+    model  = joblib.load(model_path)
+    scaler = joblib.load(scaler_path)
+    fitur  = joblib.load(fitur_path)
+    print(f"\n✅ Model dimuat : {model_path.name} | {len(fitur)} fitur")
+    return model, scaler, fitur
+
+
+# ==========================================================
+# 6. PREDIKSI
+# ==========================================================
+
+def normalize_prediction_days(df: pd.DataFrame) -> pd.DataFrame:
+    """Kurangi prediksi_hari satu hari sebelum dipakai untuk save/output.
+
+    Ini menjaga konsistensi business rule: tanggal_habis dihitung dari hari final
+    yang sudah dikurangi 1, bukan dari nilai mentah model.
+    """
+    df = df.copy()
+    if "prediksi_hari" not in df.columns:
+        return df
+
+    df["prediksi_hari"] = pd.to_numeric(df["prediksi_hari"], errors="coerce").fillna(0)
+    df["prediksi_hari"] = np.maximum(df["prediksi_hari"] - 1, 0).astype(int)
+    return df
+
+
+def assign_threshold(df: pd.DataFrame) -> pd.DataFrame:
+    """Tetapkan label status berdasarkan prediksi_hari.
+
+    Aturan status final:
+      - <= 1 hari  -> Kritis
+      - 2 sampai 3 hari -> Waspada
+      - > 3 hari -> Aman
+    """
+    df = df.copy()
+    df["prediksi_hari"] = pd.to_numeric(df["prediksi_hari"], errors="coerce").fillna(0)
+    df["threshold"] = df["prediksi_hari"].apply(status_from_hari)
+    return df
+
+
+def apply_business_rule_fallback(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Jika business rule fallback dinyalakan secara eksplisit, ganti prediksi dengan
+    business rule jika menyimpang >50%. Secara default fallback dimatikan agar
+    model penuh tetap dipakai.
+
+    Business rule:
+      sisa_pagu < ratas_harian -> 0 hari (habis hari ini)
+      selainnya                -> int(sisa_pagu / ratas_harian) - 1
+    """
+    df = df.copy()
+
+    if not BUSINESS_RULE_FALLBACK_ENABLED:
+        print("  ℹ️  Business rule fallback OFF — memakai full model")
+        return assign_threshold(df)
+
+    _raw = (
+        (df["sisa_pagu"] / df["ratas_harian"].replace(0, np.nan))
+        .fillna(0)
+        .astype(float)
+        .astype(int)
+    )
+    df["business_rule_hari"] = np.where(
+        df["sisa_pagu"] < df["ratas_harian"], 0, np.maximum(_raw - 1, 0)
+    )
+
+    if "prediksi_hari" in df.columns:
+        diff        = np.abs(df["prediksi_hari"] - df["business_rule_hari"])
+        denominator = df["business_rule_hari"].replace(0, 1)
+        diff_pct    = (diff / denominator) * 100
+        use_rule    = diff_pct > 50
+
+        if use_rule.any():
+            print(f"  ⚠️  {use_rule.sum()} TID menggunakan business rule fallback")
+            df.loc[use_rule, "prediksi_hari"] = df.loc[use_rule, "business_rule_hari"]
+            df.loc[use_rule, "tanggal_habis"] = (
+                pd.to_datetime(df.loc[use_rule, DT_COL]) +
+                pd.to_timedelta(df.loc[use_rule, "business_rule_hari"], unit="D")
+            ).dt.strftime("%d-%m-%Y")
+
+    df = assign_threshold(df)
+    return df
+
+
+def predict(df: pd.DataFrame, model, scaler, fitur: list) -> pd.DataFrame:
+    """Jalankan prediksi jumlah_hari dan hitung tanggal_habis."""
+    print("\n" + "=" * 70)
+    print("PREDIKSI")
+    print("=" * 70)
+
+    fitur_kurang = [f for f in fitur if f not in df.columns]
+    if fitur_kurang:
+        raise ValueError(f"Kolom fitur tidak tersedia: {fitur_kurang}")
+
+    X = df[fitur].copy()
+    for col in fitur:
+        if X[col].isna().any():
+            X[col] = X[col].fillna(X[col].median() if len(X) > 0 else 0)
+
+    X_scaled      = scaler.transform(X)
+    prediksi_hari = np.maximum(np.ceil(model.predict(X_scaled)).astype(int), 0)
+
+    df = df.copy()
+    df["prediksi_hari"] = prediksi_hari
+    df = normalize_prediction_days(df)
+    df["tanggal_habis"] = (
+        pd.to_datetime(df[DT_COL]) +
+        pd.to_timedelta(df["prediksi_hari"], unit="D")
+    ).dt.strftime("%d-%m-%Y")
+    df["prediksi_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    df = assign_threshold(df)
+
+    # Tampilkan ringkasan
+    kolom_tampil = ["tid", DT_COL, "sisa_pagu", "ratas_harian",
+                    "prediksi_hari", "tanggal_habis"]
+    kolom_ada = [k for k in kolom_tampil if k in df.columns]
+    print("\n📊 HASIL PREDIKSI (20 ATM TERAWAL):")
+    print(df[kolom_ada].head(20).to_string())
+    print(f"\n📊 STATISTIK:")
+    print(f"  Total ATM         : {len(df)}")
+    print(f"  Rata-rata prediksi: {df['prediksi_hari'].mean():.1f} hari")
+    print(f"  Min prediksi      : {df['prediksi_hari'].min()} hari")
+    print(f"  Max prediksi      : {df['prediksi_hari'].max()} hari")
+    print(f"\n📊 DISTRIBUSI STATUS (log only):")
+    print(df["threshold"].value_counts().to_string() if "threshold" in df.columns else "(threshold tidak disimpan)")
+
+    return df
+
+
+# ==========================================================
+# 7. UPSERT KE hasil_prediksi (hanya TID terdampak)
+# ==========================================================
+
+def ensure_prediction_table_schema(conn) -> None:
+    """Pastikan tabel hasil_prediksi punya kolom sesuai skema terbaru."""
+    conn.execute(text(f"""
+        CREATE TABLE IF NOT EXISTS {PREDICTION_TABLE} (
+            tid           VARCHAR(50),
+            {DT_COL}      DATETIME,
+            total_lmb     BIGINT,
+            pagu_existing BIGINT,
+            sisa_pagu     BIGINT,
+            ratas_harian  INT,
+            prediksi_hari INT,
+            tanggal_habis VARCHAR(20),
+            prediksi_at   DATETIME
+        )
+    """))
+
+    existing_cols = {
+        row[0]
+        for row in conn.execute(text("""
+            SELECT COLUMN_NAME
+            FROM information_schema.columns
+            WHERE table_schema = DATABASE()
+              AND table_name = :table_name
+        """), {"table_name": PREDICTION_TABLE}).fetchall()
+    }
+
+    required_columns = {
+        "selisih_lmb": "ALTER TABLE {table_name} ADD COLUMN selisih_lmb INT NULL",
+    }
+
+    for col_name, ddl_template in required_columns.items():
+        if col_name not in existing_cols:
+            conn.execute(text(ddl_template.format(table_name=PREDICTION_TABLE)))
+
+
+def save_predictions(df: pd.DataFrame) -> None:
+    """
+    UPSERT hasil prediksi ke tabel hasil_prediksi.
+    Hanya TID yang baru diprediksi yang diupdate.
+    TID lain tidak disentuh.
+    """
+    print(f"\n💾 UPSERT ke tabel '{PREDICTION_TABLE}'...")
+
+    kolom_simpan = [
+        "tid", DT_COL, "total_lmb", "pagu_existing", "sisa_pagu",
+        "ratas_harian", "selisih_lmb", "prediksi_hari", "tanggal_habis",
+        "prediksi_at",
+    ]
+    kolom_ada = [k for k in kolom_simpan if k in df.columns]
+    df_save   = df[kolom_ada].copy()
+
+    # Cast tipe data
+    df_save["tid"]           = df_save["tid"].astype(str)
+    df_save[DT_COL]          = pd.to_datetime(df_save[DT_COL])
+    df_save["tanggal_habis"] = df_save["tanggal_habis"].astype(str)
+    df_save["prediksi_at"]   = pd.to_datetime(df_save["prediksi_at"])
+
+    for col in ["total_lmb", "pagu_existing", "sisa_pagu",
+                "ratas_harian", "selisih_lmb", "prediksi_hari"]:
+        if col in df_save.columns:
+            df_save[col] = (
+                pd.to_numeric(df_save[col], errors="coerce").fillna(0).astype("int64")
+            )
+
+    dtype_map = {
+        "tid":           String(50),
+        DT_COL:          DateTime(),
+        "total_lmb":     BigInteger(),
+        "pagu_existing": BigInteger(),
+        "sisa_pagu":     BigInteger(),
+        "ratas_harian":  Integer(),
+        "selisih_lmb":   Integer(),
+        "prediksi_hari": Integer(),
+        "tanggal_habis": String(20),
+        "prediksi_at":   DateTime(),
+    }
+    dtype_map = {k: v for k, v in dtype_map.items() if k in df_save.columns}
+
+    affected_tids = df_save["tid"].tolist()
+    staging_table = f"_staging_pred_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+
+    engine = get_db_engine()
+    with engine.begin() as conn:
+        # 1. Pastikan tabel hasil_prediksi punya skema baru
+        ensure_prediction_table_schema(conn)
+
+        # 2. Tulis ke staging
+        df_save.to_sql(
+            name=staging_table,
+            con=conn,
+            if_exists="replace",
+            index=False,
+            chunksize=500,
+            dtype=dtype_map,
+        )
+
+        # 3. DELETE baris lama untuk TID terdampak
+        placeholders = ", ".join([f"'{t}'" for t in affected_tids])
+        conn.execute(text(
+            f"DELETE FROM {PREDICTION_TABLE} WHERE tid IN ({placeholders})"
+        ))
+
+        # 4. INSERT dari staging
+        cols = ", ".join(df_save.columns.tolist())
+        conn.execute(text(f"""
+            INSERT INTO {PREDICTION_TABLE} ({cols})
+            SELECT {cols} FROM {staging_table}
+        """))
+
+        # 5. Drop staging
+        conn.execute(text(f"DROP TABLE IF EXISTS {staging_table}"))
+
+    print(f"✅ UPSERT selesai: {len(df_save)} baris ({len(affected_tids)} TID diperbarui)")
+
+
+# ==========================================================
+# MAIN
+# ==========================================================
+
+def main():
+    now = datetime.now()
+    print("=" * 70)
+    print("PREDIKSI REALTIME TANGGAL HABIS ATM")
+    print(f"Waktu eksekusi : {now.strftime('%Y-%m-%d %H:%M:%S')}")
+    print("=" * 70)
+
+    try:
+        engine = get_db_engine()
+
+        # 1. Cek apakah ada data RAW baru
+        max_updated, affected_tids, is_new = check_new_raw(engine)
+
+        if not is_new:
+            print("\n⏭️  Tidak ada data baru. Prediksi di-skip.")
+            return None
+
+        # 2. Preprocessing sudah dijalankan oleh scheduler sebelum memanggil ini.
+        #    Load 1 baris terbaru per TID dari preprocessing.
+        df_all = load_latest_from_preprocessing(engine)
+
+        if df_all.empty:
+            print("❌ preprocessing kosong. Pastikan data_preprocessing.py sudah jalan.")
+            return None
+
+        # 3. Filter hanya TID yang punya data baru
+        df_terdampak = filter_affected_tids(df_all, affected_tids)
+
+        if df_terdampak.empty:
+            print("⏭️  Tidak ada TID terdampak yang ditemukan di preprocessing.")
+            return None
+
+        # 4. Validasi fitur
+        df_ready = validate_features(df_terdampak)
+
+        # 5. Load model
+        model, scaler, fitur = load_model()
+
+        # 6. Prediksi
+        df_hasil = predict(df_ready, model, scaler, fitur)
+
+        
+
+        # 8. UPSERT hanya TID terdampak
+        save_predictions(df_hasil)
+
+        print("\n" + "=" * 70)
+        print("✅ SELESAI! Prediksi realtime berhasil.")
+        print(f"   {len(df_hasil)} ATM diprediksi ulang dari {len(affected_tids)} TID terdampak")
+        print("=" * 70)
+
+        return df_hasil
+
+    except Exception as e:
+        print(f"\n❌ ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+
+if __name__ == "__main__":
+    main()
 ### Health Check
 
 ```http

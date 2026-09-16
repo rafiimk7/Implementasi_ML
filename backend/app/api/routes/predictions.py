@@ -14,16 +14,6 @@ def health() -> dict:
     return {"status": "ok"}
 
 
-# Endpoint refresh dinonaktifkan — prediksi berjalan otomatis setiap 15 menit via scheduler
-# @router.post("/refresh")
-# async def refresh_predictions() -> dict:
-#     """
-#     Menjalankan ulang predict_realtime.py sebagai subprocess
-#     untuk memperbarui hasil prediksi di database secara on-demand.
-#     """
-#     ...
-
-
 @router.get("/predictions")
 def list_predictions() -> dict:
     try:

@@ -1,10 +1,4 @@
-from pathlib import Path
-
 import pandas as pd
-import sys
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(PROJECT_ROOT))
 
 from config.config import get_db_engine
 

@@ -1,0 +1,125 @@
+{
+  "generated_at": "2026-09-16 09:37:38",
+  "model": {
+    "name": "LightGBM",
+    "type": "regression",
+    "target": "jumlah_hari",
+    "random_state": 42
+  },
+  "dataset": {
+    "total_rows": 11493,
+    "train_rows": 9144,
+    "test_rows": 2349,
+    "train_tid": 124,
+    "test_tid": 124
+  },
+  "features": {
+    "count": 48,
+    "names": [
+      "sisa_pagu",
+      "ratas_harian",
+      "selisih_lmb",
+      "hari",
+      "bulan",
+      "tahun",
+      "hari_ke",
+      "kuartal",
+      "hari_sin",
+      "hari_cos",
+      "bulan_sin",
+      "bulan_cos",
+      "hari_ke_sin",
+      "hari_ke_cos",
+      "is_weekend",
+      "is_payday",
+      "is_holiday",
+      "days_to_payday",
+      "days_since_payday",
+      "is_near_holiday_3d",
+      "rolling_7d",
+      "rolling_14d",
+      "rolling_30d",
+      "rolling_std_7d",
+      "rolling_std_14d",
+      "rolling_7d_ratio",
+      "trend_7d_ratio",
+      "trend_14d_ratio",
+      "weekend_x_ratas_harian",
+      "payday_x_sisa_pagu",
+      "holiday_x_ratas_harian",
+      "weekend_x_trend",
+      "payday_x_trend",
+      "holiday_x_trend",
+      "lag_1_ratas",
+      "lag_7_ratas",
+      "lag_14_ratas",
+      "lag_7_sisa_pagu",
+      "weekday_sin",
+      "weekday_cos",
+      "payday_x_weekday_sin",
+      "weekend_x_rolling_std_7d",
+      "cum_prev_3d",
+      "cum_prev_7d",
+      "cum_prev_14d",
+      "holiday_count_next_7",
+      "payday_cluster_flag",
+      "event_uplift"
+    ]
+  },
+  "split": {
+    "method": "time_series_split_per_tid",
+    "train_ratio": 0.8,
+    "test_ratio": 0.2
+  },
+  "parameters": {
+    "objective": "regression",
+    "n_estimators": 500,
+    "learning_rate": 0.05,
+    "max_depth": 8,
+    "num_leaves": 31,
+    "min_child_samples": 20,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "random_state": 42,
+    "n_jobs": -1,
+    "verbosity": -1
+  },
+  "metrics": {
+    "model": {
+      "mae_days": 0.10722653797179682,
+      "rmse_days": 0.273993477158925,
+      "r2": 0.9739964190232215,
+      "median_absolute_error_days": 0.0034645277240114834,
+      "mape_percent": 15.136403436283711,
+      "within_1_day_percent": 98.85057471264368,
+      "within_2_days_percent": 99.70200085142615,
+      "within_3_days_percent": 99.95742869306088
+    },
+    "business_rule_baseline": {
+      "mae_days": 0.01319710515112814,
+      "rmse_days": 0.15848366191529834,
+      "r2": 0.9912999508471799,
+      "median_absolute_error_days": 0.0,
+      "mape_percent": 0.5788004715043341,
+      "within_1_day_percent": 99.57428693060876,
+      "within_2_days_percent": 99.91485738612175,
+      "within_3_days_percent": 100.0
+    },
+    "mae_improvement_percent": -712.5004441798411
+  },
+  "error_tolerance": {
+    "within_1_day_percent": 98.85057471264368,
+    "within_2_days_percent": 99.70200085142615,
+    "within_3_days_percent": 99.95742869306088
+  },
+  "status_distribution": {
+    "🔴 Kritis": 2020,
+    "🟠 Waspada": 181,
+    "🟢 Aman": 148
+  },
+  "baseline_definition": {
+    "condition": "sisa_pagu < ratas_harian",
+    "result": "0 hari",
+    "formula": "floor(sisa_pagu / ratas_harian) - 1"
+  }
+}

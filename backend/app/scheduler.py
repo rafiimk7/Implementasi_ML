@@ -43,13 +43,29 @@ logger = logging.getLogger(__name__)
 # 1. PREDICT_INTERVAL_MINUTES (mode baru)
 # 2. PREDICT_INTERVAL_HOURS (legacy compatibility, dikonversi ke menit)
 # 3. fallback default 15 menit
-PREDICT_INTERVAL_MINUTES = int(
-    os.getenv("PREDICT_INTERVAL_MINUTES")
-    or (int(os.getenv("PREDICT_INTERVAL_HOURS", 0)) * 60 if os.getenv("PREDICT_INTERVAL_HOURS") else 15)
-)
-PREDICT_WINDOW_DAYS     = int(os.getenv("PREDICT_WINDOW_DAYS", "31"))
-RETRAIN_DAY_OF_WEEK     = os.getenv("RETRAIN_DAY_OF_WEEK", "sun")
-RETRAIN_HOUR            = int(os.getenv("RETRAIN_HOUR", 2))
+
+def _resolve_predict_interval_minutes() -> int:
+    configured_minutes = os.getenv("PREDICT_INTERVAL_MINUTES")
+    if configured_minutes:
+        return int(configured_minutes)
+
+    legacy_hours = os.getenv("PREDICT_INTERVAL_HOURS")
+    if legacy_hours:
+        return int(legacy_hours) * 60
+
+    return 15
+
+
+PREDICT_INTERVAL_MINUTES = _resolve_predict_interval_minutes()
+RETRAIN_DAY_OF_WEEK = os.getenv("RETRAIN_DAY_OF_WEEK", "sun")
+RETRAIN_HOUR = int(os.getenv("RETRAIN_HOUR", 2))
+
+
+def _ensure_scripts_path() -> None:
+    """Pastikan folder scripts dapat diimport saat scheduler menjalankan job."""
+    scripts_path = PROJECT_ROOT / "scripts"
+    if str(scripts_path) not in sys.path:
+        sys.path.insert(0, str(scripts_path))
 
 
 # ==========================================================
@@ -73,9 +89,7 @@ def job_predict_realtime() -> None:
     Tidak melakukan training ulang.
     """
     logger.info("[Scheduler] ── Memulai siklus prediksi realtime ──")
-    scripts_path = PROJECT_ROOT / "scripts"
-    if str(scripts_path) not in sys.path:
-        sys.path.insert(0, str(scripts_path))
+    _ensure_scripts_path()
 
     try:
         from data_preprocessing import main as preprocess_main
@@ -110,10 +124,7 @@ def job_retrain() -> None:
          semua TID dengan model yang baru dilatih.
     """
     logger.info("[Scheduler] ── Memulai retraining model (full pipeline) ──")
-
-    scripts_path = PROJECT_ROOT / "scripts"
-    if str(scripts_path) not in sys.path:
-        sys.path.insert(0, str(scripts_path))
+    _ensure_scripts_path()
 
     try:
         from data_preprocessing import main as preprocess_main
